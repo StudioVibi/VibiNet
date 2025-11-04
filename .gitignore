@@ -32,3 +32,6 @@ walkers/dist/
 # PID files
 .server.pid
 walkers/.serve.pid
+
+# Local scratch
+.stuff/
