@@ -43,7 +43,10 @@ rl.on("line", (input) => {
     case "/load": {
       const room = parts[1];
       const from = parseInt(parts[2]) || 0;
-      client.load(room, from);
+      client.load(room, from, (message) => {
+        console.log(JSON.stringify(message, null, 2));
+        rl.prompt();
+      });
       break;
     }
     case "/watch": {

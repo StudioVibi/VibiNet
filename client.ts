@@ -65,12 +65,23 @@ export function post(room: string, data: any): void {
   ws.send(JSON.stringify({$: "post", room, time: server_time(), data}));
 }
 
-export function load(room: string, from: number = 0): void {
+export function load(room: string, from: number = 0, handler?: MessageHandler): void {
+  if (handler) {
+    if (room_watchers.has(room)) {
+      throw new Error(`Handler already registered for room: ${room}`);
+    }
+    room_watchers.set(room, handler);
+  }
   ws.send(JSON.stringify({$: "load", room, from}));
 }
 
-export function watch(room: string, handler: MessageHandler): void {
-  room_watchers.set(room, handler);
+export function watch(room: string, handler?: MessageHandler): void {
+  if (handler) {
+    if (room_watchers.has(room)) {
+      throw new Error(`Handler already registered for room: ${room}`);
+    }
+    room_watchers.set(room, handler);
+  }
   ws.send(JSON.stringify({$: "watch", room}));
 }
 
