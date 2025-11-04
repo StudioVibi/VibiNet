@@ -1,5 +1,4 @@
 import { WebSocket } from "ws";
-import * as readline from "readline";
 
 type TimeSync = {
   clock_offset: number;     // difference between server clock and local clock
@@ -15,83 +14,24 @@ const time_sync: TimeSync = {
 
 const ws = new WebSocket("ws://localhost:8080");
 
+// Room watchers with callbacks
+type MessageHandler = (message: any) => void;
+const room_watchers = new Map<string, MessageHandler>();
+
 function now(): number {
   return Math.floor(Date.now());
 }
 
-function server_time(): number {
+export function server_time(): number {
   return Math.floor(now() + time_sync.clock_offset);
 }
 
-// Setup readline for interactive input
-const rl = readline.createInterface({
-  input: process.stdin,
-  output: process.stdout,
-  prompt: "> "
-});
-
-// Handle Ctrl-C and Ctrl-Z to exit gracefully
-process.on("SIGINT", () => {
-  console.log("\nExiting...");
-  ws.close();
-  process.exit(0);
-});
-
-process.on("SIGTSTP", () => {
-  console.log("\nExiting...");
-  ws.close();
-  process.exit(0);
-});
-
+// Setup time sync
 ws.on("open", () => {
-  // Send get_time every 2 seconds
   setInterval(() => {
     time_sync.request_sent_at = now();
     ws.send(JSON.stringify({ $: "get_time" }));
   }, 2000);
-
-  // Print server time every 1 second
-  //setInterval(() => {
-    //console.log("Server time:", server_time());
-  //}, 1000);
-
-  // Show prompt
-  rl.prompt();
-});
-
-// Handle user input
-rl.on("line", (input) => {
-  const trimmed = input.trim();
-  const parts = trimmed.split(" ");
-  const command = parts[0];
-
-  switch (command) {
-    case "/post": {
-      const room = parts[1];
-      const json = parts.slice(2).join(" ");
-      const data = JSON.parse(json);
-      ws.send(JSON.stringify({$: "post", room, time: server_time(), data}));
-      break;
-    }
-    case "/load": {
-      const room = parts[1];
-      const from = parseInt(parts[2]) || 0;
-      ws.send(JSON.stringify({$: "load", room, from}));
-      break;
-    }
-    case "/watch": {
-      const room = parts[1];
-      ws.send(JSON.stringify({$: "watch", room}));
-      break;
-    }
-    case "/unwatch": {
-      const room = parts[1];
-      ws.send(JSON.stringify({$: "unwatch", room}));
-      break;
-    }
-  }
-
-  rl.prompt();
 });
 
 ws.on("message", (data) => {
@@ -109,8 +49,36 @@ ws.on("message", (data) => {
       break;
     }
     case "info_post": {
-      console.log(JSON.stringify(message, null, 2));
+      // Notify room-specific handler
+      const handler = room_watchers.get(message.room);
+      if (handler) {
+        handler(message);
+      }
       break;
     }
   }
 });
+
+// API Functions
+
+export function post(room: string, data: any): void {
+  ws.send(JSON.stringify({$: "post", room, time: server_time(), data}));
+}
+
+export function load(room: string, from: number = 0): void {
+  ws.send(JSON.stringify({$: "load", room, from}));
+}
+
+export function watch(room: string, handler: MessageHandler): void {
+  room_watchers.set(room, handler);
+  ws.send(JSON.stringify({$: "watch", room}));
+}
+
+export function unwatch(room: string): void {
+  room_watchers.delete(room);
+  ws.send(JSON.stringify({$: "unwatch", room}));
+}
+
+export function close(): void {
+  ws.close();
+}
