@@ -9,7 +9,7 @@ import { readFile } from "fs/promises";
 async function buildWalkers() {
   try {
     const result1 = Bun.spawnSync({ cmd: ["bun", "build", "client.ts", "--outdir", "walkers/dist", "--target=browser", "--format=esm"] });
-    const result2 = Bun.spawnSync({ cmd: ["bun", "build", "state_machine.ts", "--outdir", "walkers/dist", "--target=browser", "--format=esm"] });
+    const result2 = Bun.spawnSync({ cmd: ["bun", "build", "vibi.ts", "--outdir", "walkers/dist", "--target=browser", "--format=esm"] });
     const result3 = Bun.spawnSync({ cmd: ["bun", "build", "walkers/index.ts", "--outdir", "walkers/dist", "--target=browser", "--format=esm"] });
     if (!result1.success || !result2.success || !result3.success) {
       console.error("[BUILD] walkers build failed", { r1: result1.success, r2: result2.success, r3: result3.success });

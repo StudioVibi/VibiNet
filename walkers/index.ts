@@ -1,4 +1,4 @@
-import { StateMachine } from "../state_machine.js";
+import { Vibi } from "../vibi.js";
 import { on_sync, ping } from "../client.js";
 export { on_sync, ping } from "../client.js";
 
@@ -80,7 +80,7 @@ function on_post(post: GamePost, state: GameState): GameState {
 
 // Create and export game function
 export function create_game(room: string, smooth: (past: GameState, curr: GameState) => GameState) {
-  const sm = new StateMachine<GameState, GamePost>(
+  const vibi = new Vibi<GameState, GamePost>(
     room,
     initial_state,
     on_tick,
@@ -90,7 +90,7 @@ export function create_game(room: string, smooth: (past: GameState, curr: GameSt
     TOLERANCE
   );
 
-  return sm;
+  return vibi;
 }
 
 // ---- App bootstrap (no JS in HTML) ----
