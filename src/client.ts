@@ -29,17 +29,27 @@ export function server_time(): number {
 
 function ensure_open(): void { if (ws.readyState !== WebSocket.OPEN) throw new Error("WebSocket not open"); }
 
-export function send(obj: any): void { ensure_open(); ws.send(JSON.stringify(obj)); }
+export function send(obj: any): void {
+  ensure_open();
+  ws.send(JSON.stringify(obj));
+}
 
 function register_handler(room: string, handler?: MessageHandler): void {
-  if (!handler) return; if (room_watchers.has(room)) throw new Error(`Handler already registered for room: ${room}`); room_watchers.set(room, handler);
+  if (!handler) return;
+  if (room_watchers.has(room)) {
+    throw new Error(`Handler already registered for room: ${room}`);
+  }
+  room_watchers.set(room, handler);
 }
 
 ws.addEventListener("open", () => {
   console.log("[WS] Connected");
   time_sync.request_sent_at = now();
   ws.send(JSON.stringify({ $: "get_time" }));
-  setInterval(() => { time_sync.request_sent_at = now(); ws.send(JSON.stringify({ $: "get_time" })); }, 2000);
+  setInterval(() => {
+    time_sync.request_sent_at = now();
+    ws.send(JSON.stringify({ $: "get_time" }));
+  }, 2000);
 });
 
 ws.addEventListener("message", (event) => {
@@ -54,12 +64,20 @@ ws.addEventListener("message", (event) => {
         time_sync.clock_offset = message.time - local_avg_time;
         time_sync.lowest_ping  = ping;
       }
-      if (!is_synced) { is_synced = true; for (const cb of sync_listeners) cb(); sync_listeners.length = 0; }
+      if (!is_synced) {
+        is_synced = true;
+        for (const cb of sync_listeners) {
+          cb();
+        }
+        sync_listeners.length = 0;
+      }
       break;
     }
     case "info_post": {
       const handler = room_watchers.get(message.room);
-      if (handler) handler(message);
+      if (handler) {
+        handler(message);
+      }
       break;
     }
   }
@@ -69,16 +87,56 @@ ws.addEventListener("message", (event) => {
 export function gen_name(): string {
   const alphabet = "_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-";
   const bytes = new Uint8Array(8);
-  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") crypto.getRandomValues(bytes);
-  else for (let idx = 0; idx < 8; idx++) bytes[idx] = Math.floor(Math.random() * 256);
-  let out = ""; for (let idx = 0; idx < 8; idx++) out += alphabet[bytes[idx] % 64]; return out;
+
+  const can_crypto = typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function";
+  if (can_crypto) {
+    crypto.getRandomValues(bytes);
+  } else {
+    for (let idx = 0; idx < 8; idx++) {
+      bytes[idx] = Math.floor(Math.random() * 256);
+    }
+  }
+
+  let out = "";
+  for (let idx = 0; idx < 8; idx++) {
+    out += alphabet[bytes[idx] % 64];
+  }
+  return out;
 }
 
-export function post(room: string, data: any): string { const name = gen_name(); send({ $: "post", room, time: server_time(), name, data }); return name; }
-export function load(room: string, from: number = 0, handler?: MessageHandler): void { register_handler(room, handler); send({ $: "load", room, from }); }
-export function watch(room: string, handler?: MessageHandler): void { register_handler(room, handler); send({ $: "watch", room }); }
-export function unwatch(room: string): void { room_watchers.delete(room); send({ $: "unwatch", room }); }
-export function close(): void { ws.close(); }
-export function on_sync(callback: () => void): void { if (is_synced) { callback(); return; } sync_listeners.push(callback); }
-export function ping(): number { return time_sync.last_ping; }
+export function post(room: string, data: any): string {
+  const name = gen_name();
+  send({ $: "post", room, time: server_time(), name, data });
+  return name;
+}
 
+export function load(room: string, from: number = 0, handler?: MessageHandler): void {
+  register_handler(room, handler);
+  send({ $: "load", room, from });
+}
+
+export function watch(room: string, handler?: MessageHandler): void {
+  register_handler(room, handler);
+  send({ $: "watch", room });
+}
+
+export function unwatch(room: string): void {
+  room_watchers.delete(room);
+  send({ $: "unwatch", room });
+}
+
+export function close(): void {
+  ws.close();
+}
+
+export function on_sync(callback: () => void): void {
+  if (is_synced) {
+    callback();
+    return;
+  }
+  sync_listeners.push(callback);
+}
+
+export function ping(): number {
+  return time_sync.last_ping;
+}

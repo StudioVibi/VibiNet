@@ -124,24 +124,32 @@ export class Vibi<S, P> {
 
     for (const post of this.room_posts.values()) {
       const official_tick = this.official_tick(post);
-      if (!timeline.has(official_tick)) timeline.set(official_tick, []);
+      if (!timeline.has(official_tick)) {
+        timeline.set(official_tick, []);
+      }
       timeline.get(official_tick)!.push(post);
     }
 
     for (const post of this.local_posts.values()) {
       const official_tick = this.official_tick(post);
-      if (!timeline.has(official_tick)) timeline.set(official_tick, []);
+      if (!timeline.has(official_tick)) {
+        timeline.set(official_tick, []);
+      }
       const local_queued: Post<P> = { ...post, index: Number.MAX_SAFE_INTEGER };
       timeline.get(official_tick)!.push(local_queued);
     }
 
-    for (const posts of timeline.values()) posts.sort((a, b) => a.index - b.index);
+    for (const posts of timeline.values()) {
+      posts.sort((a, b) => a.index - b.index);
+    }
 
     let state = this.init;
     for (let tick = initial_tick; tick <= at_tick; tick++) {
       state = this.on_tick(state);
       const posts = timeline.get(tick) || [];
-      for (const post of posts) state = this.on_post(post.data, state);
+      for (const post of posts) {
+        state = this.on_post(post.data, state);
+      }
     }
     return state;
   }
