@@ -93,12 +93,13 @@ function on_post(post: GamePost, state: GameState): GameState {
 }
 
 // Create and export game function
-export function createGame(room: string) {
+export function create_game(room: string, smooth: (past: GameState, curr: GameState) => GameState) {
   const sm = new StateMachine<GameState, GamePost>(
     room,
     initial_state,
     on_tick,
     on_post,
+    smooth,
     TICKS_PER_SECOND,
     TOLERANCE
   );

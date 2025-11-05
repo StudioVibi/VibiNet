@@ -20,7 +20,7 @@
 <body>
   <canvas id="game"></canvas>
   <script type="module">
-    import { createGame, on_sync, ping } from "./dist/index.js";
+    import { create_game, on_sync, ping } from "./dist/index.js";
 
     // Setup canvas
     const canvas = document.getElementById("game");
@@ -50,10 +50,15 @@
     console.log("[GAME] Room:", room, "Nick:", nick);
 
     // Create game instance (safe to create before sync; watch/load don't require server_time)
-    const game = createGame(room);
+    // smooth(past, curr): render past world but overlay own avatar from curr
+    const smooth = (past, curr) => {
+      if (curr[nick]) past[nick] = curr[nick];
+      return past;
+    };
+    const game = create_game(room, smooth);
 
     // Track key states
-    const keyStates = {
+    const key_states = {
       w: false,
       a: false,
       s: false,
@@ -63,17 +68,17 @@
     // Setup game only after first time sync
     on_sync(() => {
       // Spawn player after sync (pinned at 200,200)
-      const spawnX = 200;
-      const spawnY = 200;
-      console.log(`[GAME] Synced; spawning '${nick}' at (${spawnX},${spawnY})`);
-      game.post({ $: "spawn", nick: nick, px: spawnX, py: spawnY });
+      const spawn_x = 200;
+      const spawn_y = 200;
+      console.log(`[GAME] Synced; spawning '${nick}' at (${spawn_x},${spawn_y})`);
+      game.post({ $: "spawn", nick: nick, px: spawn_x, py: spawn_y });
 
       // Handle keyboard input after sync
       window.addEventListener("keydown", (e) => {
         const key = e.key.toLowerCase();
         if (key === "w" || key === "a" || key === "s" || key === "d") {
-          if (!keyStates[key]) {
-            keyStates[key] = true;
+          if (!key_states[key]) {
+            key_states[key] = true;
             game.post({ $: "down", key: key, player: nick });
           }
         }
@@ -82,8 +87,8 @@
       window.addEventListener("keyup", (e) => {
         const key = e.key.toLowerCase();
         if (key === "w" || key === "a" || key === "s" || key === "d") {
-          if (keyStates[key]) {
-            keyStates[key] = false;
+          if (key_states[key]) {
+            key_states[key] = false;
             game.post({ $: "up", key: key, player: nick });
           }
         }
@@ -98,39 +103,25 @@
     const FPS = 24;
     const FRAME_TIME = 1000 / FPS;
 
-    let frameCount = 0;
-    let lastPerfLog = 0;
-    let perfSamples = [];
-
-    // Dynamic past ticks based on tolerance and current ping
-    const TICKS_PER_SECOND = 24;
-    const TICK_MS = 1000 / TICKS_PER_SECOND;
-    const TOLERANCE_MS = 300;
+    let frame_count = 0;
+    let last_perf_log = 0;
+    let perf_samples = [];
 
     function render() {
-      const renderStart = performance.now();
-      frameCount++;
+      const render_start = performance.now();
+      frame_count++;
 
       // Clear screen
       ctx.fillStyle = "#fff";
       ctx.fillRect(0, 0, canvas.width, canvas.height);
 
       // Get current game state
-      const computeStart = performance.now();
-      const presentTick = game.server_tick();
-      const rtt = ping();
-      const tolTicks = Math.ceil(TOLERANCE_MS / TICK_MS);
-      const halfRttTicks = isFinite(rtt) ? Math.ceil((rtt / 2) / TICK_MS) : 0;
-      const pastTicks = Math.max(tolTicks, halfRttTicks + 1); // add 1 tick safety
-      const pastTick = Math.max(0, presentTick - pastTicks);
-      const initialTick = game.initial_tick();
-      const ticksToProcess = initialTick !== null ? pastTick - initialTick : 0;
-      // Compute world at pastTick and self at presentTick
-      const pastState = game.compute_state_at(pastTick);
-      const presentState = game.compute_state_at(presentTick);
-      const state = { ...pastState };
-      if (presentState[nick]) state[nick] = presentState[nick];
-      const computeTime = performance.now() - computeStart;
+      const compute_start = performance.now();
+      const present_tick = game.server_tick();
+      const initial_tick = game.initial_tick();
+      const ticks_to_process = initial_tick !== null ? present_tick - initial_tick : 0;
+      const state = game.compute_render_state();
+      const compute_time = performance.now() - compute_start;
 
       // Render overlay (top-left): time - tick - ping
       ctx.fillStyle = "#000";
@@ -138,12 +129,12 @@
       ctx.textAlign = "left";
       ctx.textBaseline = "top";
       try {
-        const st = game.server_time();
-        const tk = presentTick;
-        ctx.fillText(`time: ${st}`, 8, 6);
-        ctx.fillText(`tick: ${tk}`, 8, 24);
-        const prtt = ping();
-        if (isFinite(prtt)) ctx.fillText(`ping: ${Math.round(prtt)} ms`, 8, 42);
+        const server_time_value = game.server_time();
+        const current_tick = present_tick;
+        const current_ping_ms = ping();
+        ctx.fillText(`time: ${server_time_value}`, 8, 6);
+        ctx.fillText(`tick: ${current_tick}`, 8, 24);
+        if (isFinite(current_ping_ms)) ctx.fillText(`ping: ${Math.round(current_ping_ms)} ms`, 8, 42);
       } catch {}
 
       // Render each player
@@ -158,17 +149,17 @@
         ctx.fillText(char, x, y);
       }
 
-      const renderTime = performance.now() - renderStart;
-      perfSamples.push({ compute: computeTime, render: renderTime, ticks: ticksToProcess });
+      const render_time = performance.now() - render_start;
+      perf_samples.push({ compute: compute_time, render: render_time, ticks: ticks_to_process });
 
       // Log performance every 60 frames (every 2.5 seconds at 24 FPS)
-      if (frameCount - lastPerfLog >= 60) {
-        const avgCompute = perfSamples.reduce((sum, s) => sum + s.compute, 0) / perfSamples.length;
-        const avgRender = perfSamples.reduce((sum, s) => sum + s.render, 0) / perfSamples.length;
-        const avgTicks = perfSamples.reduce((sum, s) => sum + s.ticks, 0) / perfSamples.length;
-        console.log(`[PERF] Frame ${frameCount} | Players: ${Object.keys(state).length} | Avg compute: ${avgCompute.toFixed(2)}ms | Avg render: ${avgRender.toFixed(2)}ms | Avg ticks/frame: ${avgTicks.toFixed(1)}`);
-        lastPerfLog = frameCount;
-        perfSamples = [];
+      if (frame_count - last_perf_log >= 60) {
+        const avg_compute = perf_samples.reduce((sum, s) => sum + s.compute, 0) / perf_samples.length;
+        const avg_render = perf_samples.reduce((sum, s) => sum + s.render, 0) / perf_samples.length;
+        const avg_ticks = perf_samples.reduce((sum, s) => sum + s.ticks, 0) / perf_samples.length;
+        console.log(`[PERF] Frame ${frame_count} | Players: ${Object.keys(state).length} | Avg compute: ${avg_compute.toFixed(2)}ms | Avg render: ${avg_render.toFixed(2)}ms | Avg ticks/frame: ${avg_ticks.toFixed(1)}`);
+        last_perf_log = frame_count;
+        perf_samples = [];
       }
     }
 

@@ -109,13 +109,13 @@ function gen_name(): string {
   if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
     crypto.getRandomValues(bytes);
   } else {
-    for (let i = 0; i < 8; i++) bytes[i] = Math.floor(Math.random() * 256);
+    for (let idx = 0; idx < 8; idx++) bytes[idx] = Math.floor(Math.random() * 256);
   }
-  let s = "";
-  for (let i = 0; i < 8; i++) {
-    s += alphabet[bytes[i] % 64];
+  let out = "";
+  for (let idx = 0; idx < 8; idx++) {
+    out += alphabet[bytes[idx] % 64];
   }
-  return s;
+  return out;
 }
 
 export function post(room: string, data: any): string {
