@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Walkers</title>
+  <title>Walkers V1</title>
   <style>
     body {
       margin: 0;
@@ -102,6 +102,9 @@
     let lastPerfLog = 0;
     let perfSamples = [];
 
+    // How many ticks to render in the past for everyone else
+    const PAST_TICKS = 5; // ~200ms at 24 TPS
+
     function render() {
       const renderStart = performance.now();
       frameCount++;
@@ -112,10 +115,15 @@
 
       // Get current game state
       const computeStart = performance.now();
-      const currentTick = game.server_tick();
+      const presentTick = game.server_tick();
+      const pastTick = Math.max(0, presentTick - PAST_TICKS);
       const initialTick = game.initial_tick();
-      const ticksToProcess = initialTick !== null ? currentTick - initialTick : 0;
-      const state = game.compute_current_state();
+      const ticksToProcess = initialTick !== null ? pastTick - initialTick : 0;
+      // Compute world at pastTick and self at presentTick
+      const pastState = game.compute_state_at(pastTick);
+      const presentState = game.compute_state_at(presentTick);
+      const state = { ...pastState };
+      if (presentState[nick]) state[nick] = presentState[nick];
       const computeTime = performance.now() - computeStart;
 
       // Render server time (top-left)

@@ -142,7 +142,20 @@ export class StateMachine<S, P> {
 
   // Post data to the room
   post(data: P): void {
+    // Send to server
     client.post(this.room, data);
+    // Also include locally at the last known index for instant feedback
+    const keys = Array.from(this.room_posts.keys());
+    const next_index = keys.length ? Math.max(...keys) + 1 : 0;
+    const t = this.server_time();
+    const localPost: Post<P> = {
+      room: this.room,
+      index: next_index,
+      server_time: t,
+      client_time: t,
+      data,
+    };
+    this.room_posts.set(next_index, localPost);
   }
 
   // Compute current state
