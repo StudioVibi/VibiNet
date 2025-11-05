@@ -148,8 +148,8 @@ export class StateMachine<S, P> {
         timeline.set(official_tick, []);
       }
       // Give local posts a very large index to make them apply after official posts in the same tick
-      const localQueued: Post<P> = { ...post, index: Number.MAX_SAFE_INTEGER };
-      timeline.get(official_tick)!.push(localQueued);
+      const local_queued: Post<P> = { ...post, index: Number.MAX_SAFE_INTEGER };
+      timeline.get(official_tick)!.push(local_queued);
     }
 
     // Sort posts within each tick by index
@@ -179,7 +179,7 @@ export class StateMachine<S, P> {
     // Send to server and record a local predicted copy keyed by name
     const name = client.post(this.room, data);
     const t = this.server_time();
-    const localPost: Post<P> = {
+    const local_post: Post<P> = {
       room: this.room,
       index: -1,
       server_time: t,
@@ -187,7 +187,7 @@ export class StateMachine<S, P> {
       name,
       data,
     };
-    this.local_posts.set(name, localPost);
+    this.local_posts.set(name, local_post);
   }
 
   // Compute current state
