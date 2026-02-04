@@ -35,3 +35,4 @@ walkers/.serve.pid
 
 # Local scratch
 .stuff/
+.tmp/
