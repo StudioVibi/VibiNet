@@ -184,7 +184,7 @@ export class SimClient<P> {
     return this.last_ping;
   }
 
-  post(room: string, data: P): string {
+  post(room: string, data: P, _packed: any): string {
     const name = `${this.id}-${this.seq++}`;
     const client_time = this.server_time();
     const uplink = this.sample_one_way(this.profile.uplink_ms);
@@ -198,14 +198,14 @@ export class SimClient<P> {
     return name;
   }
 
-  watch(room: string, handler?: WatchHandler<P>): void {
+  watch(room: string, _packed: any, handler?: WatchHandler<P>): void {
     if (handler) {
       this.handlers.set(room, handler);
     }
     this.network.server.watch(room, this);
   }
 
-  load(room: string, from: number): void {
+  load(room: string, from: number, _packed: any): void {
     this.network.server.load(room, from, this);
   }
 

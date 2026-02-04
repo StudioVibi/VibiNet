@@ -11,6 +11,7 @@ import {
 import {
   GamePost,
   GameState,
+  game_post_packed,
   initial,
   on_post,
   on_tick,
@@ -160,16 +161,20 @@ function create_recording_client(client: SimClient<GamePost>) {
   return {
     received,
     on_sync: (callback: () => void) => client.on_sync(callback),
-    watch: (room: string, handler?: (post: SimPost<GamePost>) => void) => {
-      client.watch(room, (post) => {
+    watch: (
+      room: string,
+      packed: any,
+      handler?: (post: SimPost<GamePost>) => void
+    ) => {
+      client.watch(room, packed, (post) => {
         received.push(post);
         if (handler) {
           handler(post);
         }
       });
     },
-    load: (room: string, from: number) => client.load(room, from),
-    post: (room: string, data: GamePost) => client.post(room, data),
+    load: (room: string, from: number, packed: any) => client.load(room, from, packed),
+    post: (room: string, data: GamePost, packed: any) => client.post(room, data, packed),
     server_time: () => client.server_time(),
     ping: () => client.ping(),
   };
@@ -317,6 +322,7 @@ function run_scenario(s: Scenario): void {
       initial,
       on_tick,
       on_post,
+      game_post_packed,
       smooth,
       TICK_RATE,
       TOLERANCE,

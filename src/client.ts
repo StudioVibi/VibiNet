@@ -1,3 +1,6 @@
+import { decode, encode, Packed } from "./packer.ts";
+import { decode_message, encode_message } from "./protocol.ts";
+
 type TimeSync = {
   clock_offset: number;     // difference between server clock and local clock
   lowest_ping: number;      // best round-trip time achieved so far
@@ -13,9 +16,11 @@ const time_sync: TimeSync = {
 };
 
 const ws = new WebSocket(`ws://${window.location.hostname}:8080`);
+ws.binaryType = "arraybuffer";
 
 type MessageHandler = (message: any) => void;
-const room_watchers = new Map<string, MessageHandler>();
+type RoomWatcher = { handler?: MessageHandler; packed: Packed };
+const room_watchers = new Map<string, RoomWatcher>();
 
 let is_synced = false;
 const sync_listeners: Array<() => void> = [];
@@ -37,35 +42,41 @@ function ensure_open(): void {
   }
 }
 
-export function send(obj: any): void {
+function send(buf: Uint8Array): void {
   ensure_open();
-  ws.send(JSON.stringify(obj));
+  ws.send(buf);
 }
 
-function register_handler(room: string, handler?: MessageHandler): void {
-  if (!handler) {
+function register_handler(room: string, packed: Packed, handler?: MessageHandler): void {
+  const existing = room_watchers.get(room);
+  if (existing) {
+    if (existing.packed !== packed) {
+      throw new Error(`Packed schema already registered for room: ${room}`);
+    }
+    if (handler) {
+      existing.handler = handler;
+    }
     return;
   }
-
-  if (room_watchers.has(room)) {
-    throw new Error(`Handler already registered for room: ${room}`);
-  }
-
-  room_watchers.set(room, handler);
+  room_watchers.set(room, { handler, packed });
 }
 
 ws.addEventListener("open", () => {
   console.log("[WS] Connected");
   time_sync.request_sent_at = now();
-  ws.send(JSON.stringify({ $: "get_time" }));
+  send(encode_message({ $: "get_time" }));
   setInterval(() => {
     time_sync.request_sent_at = now();
-    ws.send(JSON.stringify({ $: "get_time" }));
+    send(encode_message({ $: "get_time" }));
   }, 2000);
 });
 
 ws.addEventListener("message", (event) => {
-  const msg = JSON.parse(event.data);
+  const data =
+    event.data instanceof ArrayBuffer
+      ? new Uint8Array(event.data)
+      : new Uint8Array(event.data);
+  const msg = decode_message(data);
 
   switch (msg.$) {
     case "info_time": {
@@ -91,9 +102,18 @@ ws.addEventListener("message", (event) => {
     }
 
     case "info_post": {
-      const handler = room_watchers.get(msg.room);
-      if (handler) {
-        handler(msg);
+      const watcher = room_watchers.get(msg.room);
+      if (watcher && watcher.handler) {
+        const data = decode(watcher.packed, msg.payload);
+        watcher.handler({
+          $: "info_post",
+          room: msg.room,
+          index: msg.index,
+          server_time: msg.server_time,
+          client_time: msg.client_time,
+          name: msg.name,
+          data,
+        });
       }
       break;
     }
@@ -122,25 +142,31 @@ export function gen_name(): string {
   return out;
 }
 
-export function post(room: string, data: any): string {
+export function post(room: string, data: any, packed: Packed): string {
   const name = gen_name();
-  send({ $: "post", room, time: server_time(), name, data });
+  const payload = encode(packed, data);
+  send(encode_message({ $: "post", room, time: server_time(), name, payload }));
   return name;
 }
 
-export function load(room: string, from: number = 0, handler?: MessageHandler): void {
-  register_handler(room, handler);
-  send({ $: "load", room, from });
+export function load(
+  room: string,
+  from: number = 0,
+  packed: Packed,
+  handler?: MessageHandler
+): void {
+  register_handler(room, packed, handler);
+  send(encode_message({ $: "load", room, from }));
 }
 
-export function watch(room: string, handler?: MessageHandler): void {
-  register_handler(room, handler);
-  send({ $: "watch", room });
+export function watch(room: string, packed: Packed, handler?: MessageHandler): void {
+  register_handler(room, packed, handler);
+  send(encode_message({ $: "watch", room }));
 }
 
 export function unwatch(room: string): void {
   room_watchers.delete(room);
-  send({ $: "unwatch", room });
+  send(encode_message({ $: "unwatch", room }));
 }
 
 export function close(): void {

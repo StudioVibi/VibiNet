@@ -1,4 +1,5 @@
 import { Vibi } from "../src/vibi.ts";
+import type { Packed } from "../src/packer.ts";
 import { on_sync, ping, gen_name } from "../src/client.ts";
 import pkg from "../package.json" assert { type: "json" };
 
@@ -22,6 +23,34 @@ type GamePost =
   | { $: "spawn"; nick: string; px: number; py: number }
   | { $: "down"; key: "w" | "a" | "s" | "d"; player: string }
   | { $: "up"; key: "w" | "a" | "s" | "d"; player: string };
+
+const game_post_packed: Packed = {
+  $: "Union",
+  variants: {
+    down: {
+      $: "Struct",
+      fields: {
+        key: { $: "String" },
+        player: { $: "String" },
+      },
+    },
+    spawn: {
+      $: "Struct",
+      fields: {
+        nick: { $: "String" },
+        px: { $: "Int", size: 32 },
+        py: { $: "Int", size: 32 },
+      },
+    },
+    up: {
+      $: "Struct",
+      fields: {
+        key: { $: "String" },
+        player: { $: "String" },
+      },
+    },
+  },
+};
 
 // Game configuration
 const TICK_RATE         = 24; // ticks per second
@@ -79,6 +108,7 @@ export function create_game(
     initial,
     on_tick,
     on_post,
+    game_post_packed,
     smooth,
     TICK_RATE,
     TOLERANCE

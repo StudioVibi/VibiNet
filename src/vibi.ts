@@ -1,4 +1,5 @@
 import * as client from "./client.ts";
+import type { Packed } from "./packer.ts";
 
 // # Vibi (multiplayer tick engine)
 // Vibi computes deterministic game state by replaying ticks and events.
@@ -77,9 +78,9 @@ type TimelineBucket<P> = {
 
 type ClientApi<P> = {
   on_sync: (callback: () => void) => void;
-  watch: (room: string, handler?: (post: Post<P>) => void) => void;
-  load: (room: string, from: number) => void;
-  post: (room: string, data: P) => string;
+  watch: (room: string, packed: Packed, handler?: (post: Post<P>) => void) => void;
+  load: (room: string, from: number, packed: Packed) => void;
+  post: (room: string, data: P, packed: Packed) => string;
   server_time: () => number;
   ping: () => number;
 };
@@ -89,6 +90,7 @@ export class Vibi<S, P> {
   init:                S;
   on_tick:             (state: S) => S;
   on_post:             (post: P, state: S) => S;
+  post_packed:         Packed;
   smooth:              (remote: S, local: S) => S;
   tick_rate:           number;
   tolerance:           number;
@@ -351,6 +353,7 @@ export class Vibi<S, P> {
     init:      S,
     on_tick:   (state: S) => S,
     on_post:   (post: P, state: S) => S,
+    post_packed: Packed,
     smooth:    (remote: S, local: S) => S,
     tick_rate: number,
     tolerance: number,
@@ -364,6 +367,7 @@ export class Vibi<S, P> {
     this.init                 = init;
     this.on_tick              = on_tick;
     this.on_post              = on_post;
+    this.post_packed          = post_packed;
     this.smooth               = smooth;
     this.tick_rate            = tick_rate;
     this.tolerance            = tolerance;
@@ -383,7 +387,7 @@ export class Vibi<S, P> {
     this.client_api.on_sync(() => {
       console.log(`[VIBI] synced; watching+loading room=${this.room}`);
       // Watch the room with callback.
-      this.client_api.watch(this.room, (post) => {
+      this.client_api.watch(this.room, this.post_packed, (post) => {
         // If this official post matches a local predicted one, drop the local
         // copy.
         if (post.name) {
@@ -393,7 +397,7 @@ export class Vibi<S, P> {
       });
 
       // Load all existing posts
-      this.client_api.load(this.room, 0);
+      this.client_api.load(this.room, 0, this.post_packed);
     });
   }
 
@@ -502,7 +506,7 @@ export class Vibi<S, P> {
 
   // Post data to the room.
   post(data: P): void {
-    const name = this.client_api.post(this.room, data);
+    const name = this.client_api.post(this.room, data, this.post_packed);
     const t    = this.server_time();
 
     const local_post: Post<P> = {

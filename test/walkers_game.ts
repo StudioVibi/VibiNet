@@ -1,3 +1,5 @@
+import type { Packed } from "../src/packer.ts";
+
 export type Player = {
   px: number;
   py: number;
@@ -15,6 +17,34 @@ export type GamePost =
   | { $: "spawn"; nick: string; px: number; py: number }
   | { $: "down"; key: "w" | "a" | "s" | "d"; player: string }
   | { $: "up"; key: "w" | "a" | "s" | "d"; player: string };
+
+export const game_post_packed: Packed = {
+  $: "Union",
+  variants: {
+    down: {
+      $: "Struct",
+      fields: {
+        key: { $: "String" },
+        player: { $: "String" },
+      },
+    },
+    spawn: {
+      $: "Struct",
+      fields: {
+        nick: { $: "String" },
+        px: { $: "Int", size: 32 },
+        py: { $: "Int", size: 32 },
+      },
+    },
+    up: {
+      $: "Struct",
+      fields: {
+        key: { $: "String" },
+        player: { $: "String" },
+      },
+    },
+  },
+};
 
 export const TICK_RATE = 24;
 export const TOLERANCE = 300;
