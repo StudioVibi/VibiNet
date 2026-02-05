@@ -180,8 +180,12 @@ const smooth = (remote_state: State, local_state: State): State => {
   return { ...remote_state, [player_char]: local_state[player_char] };
 };
 
-// Optional: change this to your own server URL.
-const server = "ws://net.studiovibi.com:8080";
+// Choose local server when running locally; otherwise default to the hosted one.
+const host = window.location.hostname;
+const server =
+  host === "localhost" || host === "127.0.0.1"
+    ? `ws://${host}:8080`
+    : "ws://net.studiovibi.com:8080";
 
 // Create the game object (the only VibiNet object you use at runtime).
 const game = new VibiNet.game<State, Post>({
@@ -238,7 +242,24 @@ function render() {
   ctx.fillStyle = "#fff";
   ctx.fillRect(0, 0, canvas.width, canvas.height);
 
+  const curr_tick = game.server_tick();
   const state = game.compute_render_state();
+
+  ctx.fillStyle = "#111";
+  ctx.font = "14px monospace";
+  ctx.textAlign = "left";
+  ctx.textBaseline = "top";
+  try {
+    const st = game.server_time();
+    const pc = game.post_count();
+    const rtt = game.ping();
+    ctx.fillText(`room: ${room}`, 8, 6);
+    ctx.fillText(`time: ${st}`, 8, 24);
+    ctx.fillText(`tick: ${curr_tick}`, 8, 42);
+    ctx.fillText(`post: ${pc}`, 8, 60);
+    if (isFinite(rtt)) ctx.fillText(`ping: ${Math.round(rtt)} ms`, 8, 78);
+  } catch {}
+
   for (const [char, player] of Object.entries(state)) {
     ctx.fillStyle = "#111";
     ctx.font = "24px sans-serif";

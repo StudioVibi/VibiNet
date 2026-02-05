@@ -81,31 +81,9 @@ This lets players with moderate latency still have their inputs feel responsive.
 
 ### Smoothing (Optional)
 
-VibiNet can compute two states:
-- **local_state**: the present tick, including your local predicted posts.
-- **remote_state**: a past tick that is stable across all clients.
-
-The past tick is chosen as:
-
-`remote_tick = current_tick - max(tolerance_ticks, half_rtt_ticks + 1)`
-
-If you provide a `smooth(remote_state, local_state)` function, VibiNet blends
-them — typically interpolating positions so movement looks smooth despite
-network jitter. If you omit it, VibiNet renders the stable `remote_state` only.
-
-Example (keep your own player from the local state, everything else remote).
-Assume you already have a local player id called `my_id`.
-
-```ts
-const smooth = (remote_state, local_state) => {
-  const me = local_state[my_id];
-  if (!me) return remote_state;
-  return { ...remote_state, [my_id]: me };
-};
-```
-
-Here `my_id` is just your local player id (Walkers uses a single ASCII
-character as the player id).
+VibiNet can optionally blend a stable past state with a locally predicted
+present state so your own inputs feel instant. The Walkers example shows a
+simple pattern for this below.
 
 ## Example: Walkers
 
@@ -244,8 +222,19 @@ const tolerance = 300;
 
 ### 6) (Optional) Smooth Local Prediction
 
-If you want instant feedback, blend your local predicted player with the
-stable past.
+By default, VibiNet renders a **stable past** so all clients agree. If you want
+your own inputs to feel instant, blend in your local predicted player.
+
+VibiNet computes two states:
+- **local_state**: present tick, including your local inputs.
+- **remote_state**: a past tick that is stable across clients.
+
+The past tick is chosen as:
+
+`remote_tick = current_tick - max(tolerance_ticks, half_rtt_ticks + 1)`
+
+Walkers uses a single character as the player id. We keep our player from the
+local state and everyone else from the remote state:
 
 ```ts
 const my_char = "A"; // however you pick the local player
