@@ -51,7 +51,7 @@ type Post =
 // VibiNet relies on immutability to keep all clients in sync.
 
 const TICK_RATE         = 24;  // ticks per second
-const TOLERANCE         = 300; // ms
+const TOLERANCE         = 160; // ms
 const PIXELS_PER_SECOND = 200;
 const PIXELS_PER_TICK   = PIXELS_PER_SECOND / TICK_RATE;
 
