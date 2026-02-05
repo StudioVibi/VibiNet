@@ -114,6 +114,7 @@ export class VibiNet<S, P> {
   snapshot_start_tick: number | null;
   initial_time_value:  number | null;
   initial_tick_value:  number | null;
+  max_remote_index:    number;
 
   // Compute the authoritative time a post takes effect.
   private official_time(post: Post<P>): number {
@@ -273,6 +274,9 @@ export class VibiNet<S, P> {
       this.snapshot_start_tick !== null &&
       tick < this.snapshot_start_tick;
     if (before_window) {
+      if (post.index > this.max_remote_index) {
+        this.max_remote_index = post.index;
+      }
       return;
     }
 
@@ -281,6 +285,9 @@ export class VibiNet<S, P> {
     }
 
     this.remote_posts.set(post.index, post);
+    if (post.index > this.max_remote_index) {
+      this.max_remote_index = post.index;
+    }
     this.insert_remote_post(post, tick);
     this.invalidate_from_tick(tick);
   }
@@ -387,6 +394,7 @@ export class VibiNet<S, P> {
     this.snapshot_start_tick  = null;
     this.initial_time_value   = null;
     this.initial_tick_value   = null;
+    this.max_remote_index     = -1;
 
     // Wait for initial time sync before interacting with server
     this.client_api.on_sync(() => {
@@ -421,9 +429,9 @@ export class VibiNet<S, P> {
     return this.time_to_tick(this.server_time());
   }
 
-  // Total authoritative remote posts retained (bounded with cache).
+  // Total authoritative remote posts seen so far.
   post_count(): number {
-    return this.remote_posts.size;
+    return this.max_remote_index + 1;
   }
 
   // Build a render state from a past (remote) tick and current (local) tick.
