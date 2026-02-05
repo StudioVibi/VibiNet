@@ -1,8 +1,8 @@
-import * as client from "./client.ts";
+import { create_client, ClientApi, gen_name as gen_name_impl } from "./client.ts";
 import type { Packed } from "./packer.ts";
 
-// # Vibi (multiplayer tick engine)
-// Vibi computes deterministic game state by replaying ticks and events.
+// # VibiNet (deterministic replay engine)
+// VibiNet computes deterministic game state by replaying ticks and events.
 // State at tick T is: start at init, apply on_tick(state) for each tick,
 // then apply on_post(post, state) for every event in that tick. on_tick
 // and on_post must treat state as immutable; when caching is on,
@@ -15,7 +15,7 @@ import type { Packed } from "./packer.ts";
 // applies the same rule, so a post maps to the same tick everywhere.
 //
 // ## Remote vs local events
-// Vibi keeps two sources: remote_posts (authoritative server posts,
+// VibiNet keeps two sources: remote_posts (authoritative server posts,
 // keyed by index) and local_posts (predicted posts created locally for
 // instant response). Timeline buckets map tick -> { remote[], local[] }.
 // remote[] is sorted by post.index and applied first; local[] is applied
@@ -29,6 +29,7 @@ import type { Packed } from "./packer.ts";
 // current tick including local prediction. compute_render_state picks
 // remote_tick = curr_tick - max(tolerance_ticks, half_rtt_ticks + 1),
 // computes both states, then calls smooth(remote_state, local_state).
+// If smooth is omitted, the default just returns remote_state.
 // The game typically keeps remote players from remote_state and the
 // local player from local_state to hide jitter without delaying input.
 //
@@ -76,21 +77,29 @@ type TimelineBucket<P> = {
   local: Post<P>[];
 };
 
-type ClientApi<P> = {
-  on_sync: (callback: () => void) => void;
-  watch: (room: string, packed: Packed, handler?: (post: Post<P>) => void) => void;
-  load: (room: string, from: number, packed: Packed) => void;
-  post: (room: string, data: P, packed: Packed) => string;
-  server_time: () => number;
-  ping: () => number;
+type VibiNetOptions<S, P> = {
+  server?: string;
+  room: string;
+  initial: S;
+  on_tick: (state: S) => S;
+  on_post: (post: P, state: S) => S;
+  packer: Packed;
+  tick_rate: number;
+  tolerance: number;
+  smooth?: (remote: S, local: S) => S;
+  cache?: boolean;
+  snapshot_stride?: number;
+  snapshot_count?: number;
+  client?: ClientApi<P>;
 };
 
-export class Vibi<S, P> {
+export class VibiNet<S, P> {
+  static game = VibiNet;
   room:                string;
   init:                S;
   on_tick:             (state: S) => S;
   on_post:             (post: P, state: S) => S;
-  post_packed:         Packed;
+  packer:              Packed;
   smooth:              (remote: S, local: S) => S;
   tick_rate:           number;
   tolerance:           number;
@@ -347,30 +356,26 @@ export class Vibi<S, P> {
     return state;
   }
 
-  // Create a Vibi instance and hook the client sync/load/watch callbacks.
-  constructor(
-    room:      string,
-    init:      S,
-    on_tick:   (state: S) => S,
-    on_post:   (post: P, state: S) => S,
-    post_packed: Packed,
-    smooth:    (remote: S, local: S) => S,
-    tick_rate: number,
-    tolerance: number,
-    cache:     boolean = true,
-    snapshot_stride: number = 8,
-    snapshot_count:  number = 256,
-    client_api: ClientApi<P> = client
-  ) {
+  // Create a VibiNet instance and hook the client sync/load/watch callbacks.
+  constructor(options: VibiNetOptions<S, P>) {
+    const default_smooth = (remote: S, _local: S): S => remote;
+    const smooth = options.smooth ?? default_smooth;
+    const cache = options.cache ?? true;
+    const snapshot_stride = options.snapshot_stride ?? 8;
+    const snapshot_count = options.snapshot_count ?? 256;
+    const client_api =
+      options.client ??
+      create_client<P>(options.server);
+
     // Initialize configuration, caches, and timeline.
-    this.room                 = room;
-    this.init                 = init;
-    this.on_tick              = on_tick;
-    this.on_post              = on_post;
-    this.post_packed          = post_packed;
+    this.room                 = options.room;
+    this.init                 = options.initial;
+    this.on_tick              = options.on_tick;
+    this.on_post              = options.on_post;
+    this.packer               = options.packer;
     this.smooth               = smooth;
-    this.tick_rate            = tick_rate;
-    this.tolerance            = tolerance;
+    this.tick_rate            = options.tick_rate;
+    this.tolerance            = options.tolerance;
     this.client_api           = client_api;
     this.remote_posts         = new Map();
     this.local_posts          = new Map();
@@ -387,7 +392,7 @@ export class Vibi<S, P> {
     this.client_api.on_sync(() => {
       console.log(`[VIBI] synced; watching+loading room=${this.room}`);
       // Watch the room with callback.
-      this.client_api.watch(this.room, this.post_packed, (post) => {
+      this.client_api.watch(this.room, this.packer, (post) => {
         // If this official post matches a local predicted one, drop the local
         // copy.
         if (post.name) {
@@ -397,7 +402,7 @@ export class Vibi<S, P> {
       });
 
       // Load all existing posts
-      this.client_api.load(this.room, 0, this.post_packed);
+      this.client_api.load(this.room, 0, this.packer);
     });
   }
 
@@ -506,7 +511,7 @@ export class Vibi<S, P> {
 
   // Post data to the room.
   post(data: P): void {
-    const name = this.client_api.post(this.room, data, this.post_packed);
+    const name = this.client_api.post(this.room, data, this.packer);
     const t    = this.server_time();
 
     const local_post: Post<P> = {
@@ -525,4 +530,21 @@ export class Vibi<S, P> {
   compute_current_state(): S {
     return this.compute_state_at(this.server_tick());
   }
+
+  on_sync(callback: () => void): void {
+    this.client_api.on_sync(callback);
+  }
+
+  ping(): number {
+    return this.client_api.ping();
+  }
+
+  static gen_name(): string {
+    return gen_name_impl();
+  }
+}
+
+export namespace VibiNet {
+  export type Packed = Packed;
+  export type Options<S, P> = VibiNetOptions<S, P>;
 }

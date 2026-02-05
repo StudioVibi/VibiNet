@@ -1,4 +1,4 @@
-import { test, expect, mock } from "bun:test";
+import { test, expect } from "bun:test";
 import {
   create_rng,
   rand_between,
@@ -9,9 +9,9 @@ import {
   SimPost,
 } from "./sim_network.ts";
 import {
-  GamePost,
-  GameState,
-  game_post_packed,
+  Post,
+  State,
+  packer,
   initial,
   on_post,
   on_tick,
@@ -19,22 +19,14 @@ import {
   TOLERANCE,
 } from "./walkers_game.ts";
 
-mock.module("../src/client.ts", () => ({
-  on_sync: () => {},
-  watch: () => {},
-  load: () => {},
-  post: () => "",
-  server_time: () => 0,
-  ping: () => Infinity,
-}));
-
-const { Vibi } = await import("../src/vibi.ts");
+const { VibiNet } = await import("../src/vibi.ts");
 
 type PlayerSim = {
-  id: string;
-  vibi: Vibi<GameState, GamePost>;
-  client: SimClient<GamePost>;
-  received_posts: SimPost<GamePost>[];
+  id_char: string;
+  id_code: number;
+  vibi: VibiNet<State, Post>;
+  client: SimClient<Post>;
+  received_posts: SimPost<Post>[];
   sync_at: number;
   ready_at: number;
   keys: Record<"w" | "a" | "s" | "d", boolean>;
@@ -47,7 +39,7 @@ function time_to_tick(ms: number): number {
   return Math.floor((ms * TICK_RATE) / 1000);
 }
 
-function official_time(post: SimPost<GamePost>): number {
+function official_time(post: SimPost<Post>): number {
   const limit = post.server_time - TOLERANCE;
   if (post.client_time <= limit) {
     return limit;
@@ -55,24 +47,24 @@ function official_time(post: SimPost<GamePost>): number {
   return post.client_time;
 }
 
-function official_tick(post: SimPost<GamePost>): number {
+function official_tick(post: SimPost<Post>): number {
   return time_to_tick(official_time(post));
 }
 
 type TimelineBucket = {
-  remote: SimPost<GamePost>[];
-  local: SimPost<GamePost>[];
+  remote: SimPost<Post>[];
+  local: SimPost<Post>[];
 };
 
 function compute_reference_state(
-  remote_posts: SimPost<GamePost>[],
-  local_posts: SimPost<GamePost>[],
+  remote_posts: SimPost<Post>[],
+  local_posts: SimPost<Post>[],
   at_tick: number,
   include_local: boolean
-): GameState {
+): State {
   const timeline = new Map<number, TimelineBucket>();
   const seen = new Set<number>();
-  let index0: SimPost<GamePost> | null = null;
+  let index0: SimPost<Post> | null = null;
 
   for (const post of remote_posts) {
     if (seen.has(post.index)) {
@@ -134,13 +126,13 @@ function compute_reference_state(
   return state;
 }
 
-function make_smooth(nick: string) {
-  return (remote_state: GameState, local_state: GameState): GameState => {
-    const local = local_state[nick];
+function make_smooth(player_char: string) {
+  return (remote_state: State, local_state: State): State => {
+    const local = local_state[player_char];
     if (!local) {
       return remote_state;
     }
-    return { ...remote_state, [nick]: local };
+    return { ...remote_state, [player_char]: local };
   };
 }
 
@@ -156,15 +148,15 @@ function max_delivery_ms(profiles: ClientProfile[]): number {
   return max_uplink + max_downlink + (2 * max_jitter);
 }
 
-function create_recording_client(client: SimClient<GamePost>) {
-  const received: SimPost<GamePost>[] = [];
+function create_recording_client(client: SimClient<Post>) {
+  const received: SimPost<Post>[] = [];
   return {
     received,
     on_sync: (callback: () => void) => client.on_sync(callback),
     watch: (
       room: string,
       packed: any,
-      handler?: (post: SimPost<GamePost>) => void
+      handler?: (post: SimPost<Post>) => void
     ) => {
       client.watch(room, packed, (post) => {
         received.push(post);
@@ -174,29 +166,30 @@ function create_recording_client(client: SimClient<GamePost>) {
       });
     },
     load: (room: string, from: number, packed: any) => client.load(room, from, packed),
-    post: (room: string, data: GamePost, packed: any) => client.post(room, data, packed),
+    post: (room: string, data: Post, packed: any) => client.post(room, data, packed),
     server_time: () => client.server_time(),
     ping: () => client.ping(),
+    close: () => {},
   };
 }
 
 function schedule_spawn(
-  network: SimNetwork<GamePost>,
+  network: SimNetwork<Post>,
   player: PlayerSim,
   spawn_at: number
 ): void {
   network.scheduler.schedule_at(spawn_at, () => {
     player.vibi.post({
       $: "spawn",
-      nick: player.id,
-      px: 200,
-      py: 200,
+      pid: player.id_code,
+      x: 200,
+      y: 200,
     });
   });
 }
 
 function schedule_inputs(
-  network: SimNetwork<GamePost>,
+  network: SimNetwork<Post>,
   player: PlayerSim,
   rng: () => number,
   end_ms: number,
@@ -219,25 +212,25 @@ function schedule_inputs(
       const is_down = !player.keys[key];
       player.keys[key] = is_down;
       const action = is_down ? "down" : "up";
-      player.vibi.post({ $: action, key, player: player.id });
+      player.vibi.post({ $: action, pid: player.id_code, key: { $: key } });
       schedule_next();
     });
   };
   scheduler.schedule_at(start_ms, schedule_next);
 }
 
-function local_posts_for(player: PlayerSim): SimPost<GamePost>[] {
+function local_posts_for(player: PlayerSim): SimPost<Post>[] {
   const posts = (player.vibi as any).local_posts as Map<
     string,
-    SimPost<GamePost>
+    SimPost<Post>
   >;
   return Array.from(posts.values());
 }
 
 function reference_render_state(
-  network: SimNetwork<GamePost>,
+  network: SimNetwork<Post>,
   player: PlayerSim
-): GameState {
+): State {
   const remote_posts = player.received_posts;
   const local_posts = local_posts_for(player);
   const vibi = player.vibi;
@@ -266,7 +259,7 @@ function reference_render_state(
 }
 
 function assert_authoritative_sync(
-  network: SimNetwork<GamePost>,
+  network: SimNetwork<Post>,
   players: PlayerSim[],
   at_tick: number
 ): void {
@@ -279,7 +272,7 @@ function assert_authoritative_sync(
 }
 
 function assert_render_state(
-  network: SimNetwork<GamePost>,
+  network: SimNetwork<Post>,
   player: PlayerSim
 ): void {
   const expected = reference_render_state(network, player);
@@ -300,7 +293,7 @@ type Scenario = {
 
 function run_scenario(s: Scenario): void {
   const rng = create_rng(s.seed);
-  const network = new SimNetwork<GamePost>(rng);
+  const network = new SimNetwork<Post>(rng);
   const players: PlayerSim[] = [];
   const tick_ms = 1000 / TICK_RATE;
   const max_delay = max_delivery_ms(s.profiles);
@@ -313,28 +306,30 @@ function run_scenario(s: Scenario): void {
   ];
 
   for (let i = 0; i < s.profiles.length; i++) {
-    const id = String.fromCharCode("A".charCodeAt(0) + i);
-    const client = network.create_client(id, s.profiles[i]);
+    const client_id = String.fromCharCode("A".charCodeAt(0) + i);
+    const player_id = client_id.charCodeAt(0);
+    const client = network.create_client(client_id, s.profiles[i]);
     const recording = create_recording_client(client);
-    const smooth = make_smooth(id);
-    const vibi = new Vibi<GameState, GamePost>(
-      ROOM,
+    const smooth = make_smooth(client_id);
+    const vibi = new VibiNet.game<State, Post>({
+      room: ROOM,
       initial,
       on_tick,
       on_post,
-      game_post_packed,
+      packer,
+      tick_rate: TICK_RATE,
+      tolerance: TOLERANCE,
       smooth,
-      TICK_RATE,
-      TOLERANCE,
-      s.cache_enabled,
-      8,
-      256,
-      recording
-    );
+      cache: s.cache_enabled,
+      snapshot_stride: 8,
+      snapshot_count: 256,
+      client: recording,
+    });
     const sync_at = s.profiles[i].sync_delay_ms ?? 0;
     const ready_at = sync_at + max_delay + TOLERANCE + (2 * tick_ms);
     players.push({
-      id,
+      id_char: client_id,
+      id_code: player_id,
       vibi,
       client,
       received_posts: recording.received,

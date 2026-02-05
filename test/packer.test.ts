@@ -203,8 +203,8 @@ test("Union with struct variants (tag + payload) size", () => {
         $: "Struct",
         fields: {
           nick: { $: "UInt", size: 8 },
-          px: { $: "UInt", size: 10 },
-          py: { $: "UInt", size: 10 },
+          x: { $: "UInt", size: 10 },
+          y: { $: "UInt", size: 10 },
         },
       },
       up: {
@@ -218,7 +218,7 @@ test("Union with struct variants (tag + payload) size", () => {
   };
 
   // 3 variants -> tag bits = 2. Payload = 8+10+10 = 28 bits. Total = 30 bits => 4 bytes.
-  const val = { $: "spawn", nick: 7, px: 512, py: 256 };
+  const val = { $: "spawn", nick: 7, x: 512, y: 256 };
   const buf = encode(packed_t, val);
   expect(buf.length).toBe(4);
   expect(decode<typeof val>(packed_t, buf)).toEqual(val);
@@ -255,37 +255,46 @@ test("Union tag ordering is alphabetical", () => {
 });
 
 test("GamePost union encode/decode (string fields)", () => {
+  const key_packer: Packed = {
+    $: "Union",
+    variants: {
+      w: { $: "Struct", fields: {} },
+      a: { $: "Struct", fields: {} },
+      s: { $: "Struct", fields: {} },
+      d: { $: "Struct", fields: {} },
+    },
+  };
   const game_post_t: Packed = {
     $: "Union",
     variants: {
-      down: {
-        $: "Struct",
-        fields: {
-          key: { $: "String" },
-          player: { $: "String" },
-        },
-      },
       spawn: {
         $: "Struct",
         fields: {
-          nick: { $: "String" },
-          px: { $: "UInt", size: 16 },
-          py: { $: "UInt", size: 16 },
+          pid: { $: "UInt", size: 8 },
+          x: { $: "UInt", size: 16 },
+          y: { $: "UInt", size: 16 },
+        },
+      },
+      down: {
+        $: "Struct",
+        fields: {
+          pid: { $: "UInt", size: 8 },
+          key: key_packer,
         },
       },
       up: {
         $: "Struct",
         fields: {
-          key: { $: "String" },
-          player: { $: "String" },
+          pid: { $: "UInt", size: 8 },
+          key: key_packer,
         },
       },
     },
   };
 
-  const spawn = { $: "spawn", nick: "a", px: 200, py: 200 };
-  const down = { $: "down", key: "w", player: "a" };
-  const up = { $: "up", key: "d", player: "a" };
+  const spawn = { $: "spawn", pid: 97, x: 200, y: 200 };
+  const down = { $: "down", pid: 97, key: { $: "w" } };
+  const up = { $: "up", pid: 97, key: { $: "d" } };
 
   expect(decode<typeof spawn>(game_post_t, encode(game_post_t, spawn))).toEqual(spawn);
   expect(decode<typeof down>(game_post_t, encode(game_post_t, down))).toEqual(down);
@@ -293,42 +302,51 @@ test("GamePost union encode/decode (string fields)", () => {
 });
 
 test("GamePost union sizes (string fields + u16 positions)", () => {
+  const key_packer: Packed = {
+    $: "Union",
+    variants: {
+      w: { $: "Struct", fields: {} },
+      a: { $: "Struct", fields: {} },
+      s: { $: "Struct", fields: {} },
+      d: { $: "Struct", fields: {} },
+    },
+  };
   const game_post_t: Packed = {
     $: "Union",
     variants: {
-      down: {
-        $: "Struct",
-        fields: {
-          key: { $: "String" },
-          player: { $: "String" },
-        },
-      },
       spawn: {
         $: "Struct",
         fields: {
-          nick: { $: "String" },
-          px: { $: "UInt", size: 16 },
-          py: { $: "UInt", size: 16 },
+          pid: { $: "UInt", size: 8 },
+          x: { $: "UInt", size: 16 },
+          y: { $: "UInt", size: 16 },
+        },
+      },
+      down: {
+        $: "Struct",
+        fields: {
+          pid: { $: "UInt", size: 8 },
+          key: key_packer,
         },
       },
       up: {
         $: "Struct",
         fields: {
-          key: { $: "String" },
-          player: { $: "String" },
+          pid: { $: "UInt", size: 8 },
+          key: key_packer,
         },
       },
     },
   };
 
-  // Tag bits = 2. String "a"/"w" is 1 byte => 10 bits each.
-  // spawn: 2 + 10 + 16 + 16 = 44 bits => 6 bytes.
-  const spawn = { $: "spawn", nick: "a", px: 200, py: 200 };
+  // Tag bits = 2. Key enum uses 2 bits.
+  // spawn: 2 + 8 + 16 + 16 = 42 bits => 6 bytes.
+  const spawn = { $: "spawn", pid: 97, x: 200, y: 200 };
   expect(encode(game_post_t, spawn).length).toBe(6);
 
-  // down/up: 2 + 10 + 10 = 22 bits => 3 bytes.
-  const down = { $: "down", key: "w", player: "a" };
-  const up = { $: "up", key: "d", player: "a" };
-  expect(encode(game_post_t, down).length).toBe(3);
-  expect(encode(game_post_t, up).length).toBe(3);
+  // down/up: 2 + 2 + 8 = 12 bits => 2 bytes.
+  const down = { $: "down", pid: 97, key: { $: "w" } };
+  const up = { $: "up", pid: 97, key: { $: "d" } };
+  expect(encode(game_post_t, down).length).toBe(2);
+  expect(encode(game_post_t, up).length).toBe(2);
 });

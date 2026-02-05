@@ -1,46 +1,58 @@
-import type { Packed } from "../src/packer.ts";
+import { VibiNet } from "../src/index.ts";
 
 export type Player = {
-  px: number;
-  py: number;
+  x: number;
+  y: number;
   w: number;
   a: number;
   s: number;
   d: number;
 };
 
-export type GameState = {
+export type State = {
   [char: string]: Player;
 };
 
-export type GamePost =
-  | { $: "spawn"; nick: string; px: number; py: number }
-  | { $: "down"; key: "w" | "a" | "s" | "d"; player: string }
-  | { $: "up"; key: "w" | "a" | "s" | "d"; player: string };
+type Key = { $: "w" } | { $: "a" } | { $: "s" } | { $: "d" };
 
-export const game_post_packed: Packed = {
+export type Post =
+  | { $: "spawn"; pid: number; x: number; y: number }
+  | { $: "down"; pid: number; key: Key }
+  | { $: "up"; pid: number; key: Key };
+
+const key_packer: VibiNet.Packed = {
   $: "Union",
   variants: {
-    down: {
-      $: "Struct",
-      fields: {
-        key: { $: "String" },
-        player: { $: "String" },
-      },
-    },
+    w: { $: "Struct", fields: {} },
+    a: { $: "Struct", fields: {} },
+    s: { $: "Struct", fields: {} },
+    d: { $: "Struct", fields: {} },
+  },
+};
+
+export const packer: VibiNet.Packed = {
+  $: "Union",
+  variants: {
     spawn: {
       $: "Struct",
       fields: {
-        nick: { $: "String" },
-        px: { $: "Int", size: 32 },
-        py: { $: "Int", size: 32 },
+        pid: { $: "UInt", size: 8 },
+        x: { $: "Int", size: 32 },
+        y: { $: "Int", size: 32 },
+      },
+    },
+    down: {
+      $: "Struct",
+      fields: {
+        pid: { $: "UInt", size: 8 },
+        key: key_packer,
       },
     },
     up: {
       $: "Struct",
       fields: {
-        key: { $: "String" },
-        player: { $: "String" },
+        pid: { $: "UInt", size: 8 },
+        key: key_packer,
       },
     },
   },
@@ -51,17 +63,21 @@ export const TOLERANCE = 300;
 const PIXELS_PER_SECOND = 200;
 const PIXELS_PER_TICK = PIXELS_PER_SECOND / TICK_RATE;
 
-export const initial: GameState = {};
+export const initial: State = {};
 
-export function on_tick(state: GameState): GameState {
-  const new_state: GameState = {};
+function char_from_ascii_code(code: number): string {
+  return String.fromCharCode(code & 0xff);
+}
+
+export function on_tick(state: State): State {
+  const new_state: State = {};
 
   for (const [char, player] of Object.entries(state)) {
     new_state[char] = {
-      px: player.px +
+      x: player.x +
         (player.d * PIXELS_PER_TICK) +
         (player.a * -PIXELS_PER_TICK),
-      py: player.py +
+      y: player.y +
         (player.s * PIXELS_PER_TICK) +
         (player.w * -PIXELS_PER_TICK),
       w: player.w,
@@ -74,19 +90,22 @@ export function on_tick(state: GameState): GameState {
   return new_state;
 }
 
-export function on_post(post: GamePost, state: GameState): GameState {
+export function on_post(post: Post, state: State): State {
   switch (post.$) {
     case "spawn": {
-      const player = { px: 200, py: 200, w: 0, a: 0, s: 0, d: 0 };
-      return { ...state, [post.nick]: player };
+      const nick = char_from_ascii_code(post.pid);
+      const player = { x: post.x, y: post.y, w: 0, a: 0, s: 0, d: 0 };
+      return { ...state, [nick]: player };
     }
     case "down": {
-      const updated = { ...state[post.player], [post.key]: 1 };
-      return { ...state, [post.player]: updated };
+      const nick = char_from_ascii_code(post.pid);
+      const player = { ...state[nick], [post.key.$]: 1 };
+      return { ...state, [nick]: player };
     }
     case "up": {
-      const updated = { ...state[post.player], [post.key]: 0 };
-      return { ...state, [post.player]: updated };
+      const nick = char_from_ascii_code(post.pid);
+      const player = { ...state[nick], [post.key.$]: 0 };
+      return { ...state, [nick]: player };
     }
   }
   return state;
