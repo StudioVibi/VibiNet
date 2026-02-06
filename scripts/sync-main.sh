@@ -8,7 +8,7 @@ if ! flock -n 9; then
 fi
 
 REPO_DIR="${REPO_DIR:-/home/ubuntu/vibinet}"
-REPO_URL="${REPO_URL:-https://github.com/studiovibi/vibinet}"
+REPO_URL="${REPO_URL:-https://github.com/StudioVibi/VibiNet}"
 BRANCH="${BRANCH:-main}"
 BUN_BIN="${BUN_BIN:-/home/ubuntu/.bun/bin/bun}"
 SERVICE="${SERVICE:-vibinet.service}"

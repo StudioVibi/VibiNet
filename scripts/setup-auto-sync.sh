@@ -3,7 +3,7 @@ set -euo pipefail
 
 REMOTE_HOST="${REMOTE_HOST:-vibibr}"
 REMOTE_DIR="${REMOTE_DIR:-/home/ubuntu/vibinet}"
-REPO_URL="${REPO_URL:-https://github.com/studiovibi/vibinet}"
+REPO_URL="${REPO_URL:-https://github.com/StudioVibi/VibiNet}"
 BRANCH="${BRANCH:-main}"
 SYNC_INTERVAL_SECONDS="${SYNC_INTERVAL_SECONDS:-45}"
 
