@@ -5,8 +5,10 @@
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
+      "types": "./dist/index.d.ts",
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     }
@@ -17,7 +19,9 @@
   ],
   "sideEffects": false,
   "scripts": {
-    "build": "npx esbuild src/index.ts --bundle --format=esm --platform=browser --target=es2020 --outfile=dist/index.js",
+    "build:js": "npx esbuild src/index.ts --bundle --format=esm --platform=browser --target=es2020 --outfile=dist/index.js",
+    "build:types": "npx tsc src/index.ts --declaration --emitDeclarationOnly --outDir dist --module ESNext --moduleResolution bundler --target ESNext --strict --esModuleInterop --skipLibCheck --allowImportingTsExtensions",
+    "build": "npm run build:js && npm run build:types",
     "check:official-endpoint": "bash scripts/check-official-endpoint.sh",
     "prepack": "npm run check:official-endpoint && npm run build",
     "check": "tsc --target esnext --noEmit --skipLibCheck",
