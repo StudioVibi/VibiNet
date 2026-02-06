@@ -1,4 +1,5 @@
 import { VibiNet } from "../src/index.ts";
+import { walkers_server_for_host } from "../src/server_url.ts";
 import pkg from "../package.json" assert { type: "json" };
 
 // Walkers: each player is a single letter that moves with WASD.
@@ -180,12 +181,10 @@ const smooth = (remote_state: State, local_state: State): State => {
   return { ...remote_state, [player_char]: local_state[player_char] };
 };
 
-// Choose local server when running locally; otherwise default to the hosted one.
+// Choose a local ws:// endpoint only for localhost development.
+// In every other host, leave `server` undefined so VibiNet uses its default.
 const host = window.location.hostname;
-const server =
-  host === "localhost" || host === "127.0.0.1"
-    ? `ws://${host}:8080`
-    : "ws://net.studiovibi.com:8080";
+const server = walkers_server_for_host(host);
 
 // Create the game object (the only VibiNet object you use at runtime).
 const game = new VibiNet.game<State, Post>({

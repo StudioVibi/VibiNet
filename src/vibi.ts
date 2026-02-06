@@ -1,5 +1,5 @@
 import { create_client, ClientApi, gen_name as gen_name_impl } from "./client.ts";
-import type { Packed } from "./packer.ts";
+import type { Packed as PackedType } from "./packer.ts";
 
 // # VibiNet (deterministic replay engine)
 // VibiNet computes deterministic game state by replaying ticks and events.
@@ -83,7 +83,7 @@ type VibiNetOptions<S, P> = {
   initial: S;
   on_tick: (state: S) => S;
   on_post: (post: P, state: S) => S;
-  packer: Packed;
+  packer: PackedType;
   tick_rate: number;
   tolerance: number;
   smooth?: (remote: S, local: S) => S;
@@ -99,7 +99,7 @@ export class VibiNet<S, P> {
   init:                S;
   on_tick:             (state: S) => S;
   on_post:             (post: P, state: S) => S;
-  packer:              Packed;
+  packer:              PackedType;
   smooth:              (remote: S, local: S) => S;
   tick_rate:           number;
   tolerance:           number;
@@ -553,6 +553,6 @@ export class VibiNet<S, P> {
 }
 
 export namespace VibiNet {
-  export type Packed = Packed;
+  export type Packed = PackedType;
   export type Options<S, P> = VibiNetOptions<S, P>;
 }

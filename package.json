@@ -1,21 +1,42 @@
 {
   "name": "vibinet",
+  "version": "0.1.0",
+  "description": "Deterministic input-synced netcode engine for real-time games.",
   "type": "module",
-  "main": "./src/index.ts",
+  "main": "./dist/index.js",
+  "module": "./dist/index.js",
   "exports": {
-    ".": "./src/index.ts"
+    ".": {
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
   },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "sideEffects": false,
   "scripts": {
+    "build": "npx esbuild src/index.ts --bundle --format=esm --platform=browser --target=es2020 --outfile=dist/index.js",
+    "check:official-endpoint": "bash scripts/check-official-endpoint.sh",
+    "prepack": "npm run check:official-endpoint && npm run build",
     "check": "tsc --target esnext --noEmit --skipLibCheck",
-    "dev": "bun run index.ts",
     "server": "bun run src/server.ts",
-    "client": "bun run client_cli.ts",
     "deploy": "bash scripts/deploy.sh"
   },
+  "keywords": [
+    "multiplayer",
+    "netcode",
+    "rollback",
+    "deterministic",
+    "games"
+  ],
+  "license": "MIT",
   "dependencies": {
     "ws": "^8.18.0"
   },
   "devDependencies": {
-    "@types/ws": "^8.5.13"
+    "@types/ws": "^8.5.13",
+    "esbuild": "^0.25.0"
   }
 }

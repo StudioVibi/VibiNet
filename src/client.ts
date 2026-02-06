@@ -1,5 +1,6 @@
 import { decode, encode, Packed } from "./packer.ts";
 import { decode_message, encode_message } from "./protocol.ts";
+import { OFFICIAL_SERVER_URL, normalize_ws_url } from "./server_url.ts";
 
 export type ClientApi<P> = {
   on_sync: (callback: () => void) => void;
@@ -26,7 +27,7 @@ function now(): number {
 }
 
 function default_ws_url(): string {
-  return "ws://net.studiovibi.com:8080";
+  return OFFICIAL_SERVER_URL;
 }
 
 export function gen_name(): string {
@@ -62,7 +63,7 @@ export function create_client<P>(server?: string): ClientApi<P> {
   let is_synced = false;
   const sync_listeners: Array<() => void> = [];
 
-  const ws_url = server ?? default_ws_url();
+  const ws_url = normalize_ws_url(server ?? default_ws_url());
   const ws = new WebSocket(ws_url);
   ws.binaryType = "arraybuffer";
 

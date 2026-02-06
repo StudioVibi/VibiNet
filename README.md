@@ -6,17 +6,36 @@ time sync, and replay so every client computes the same state.
 
 If you can write the offline version of your game, VibiNet can make it online.
 
-## Installation
+## Quick Start (Recommended)
 
 ```bash
 npm install vibinet
 ```
 
-## Importing
-
 ```ts
 import { VibiNet } from "vibinet";
 ```
+
+Create your game instance directly from the installed package:
+
+```ts
+const game = new VibiNet.game<State, Post>({
+  room: "my-room",
+  initial,
+  on_tick,
+  on_post,
+  packer,
+  tick_rate,
+  tolerance,
+  smooth, // optional
+});
+```
+
+If you omit `server`, VibiNet uses the official server at
+`wss://net.studiovibi.com` (host: `net.studiovibi.com`).
+
+For production usage, prefer omitting `server` unless you are explicitly
+self-hosting.
 
 ## How It Works
 
@@ -252,11 +271,9 @@ Now you can construct the game. This object owns the network connection and
 state replay.
 
 ```ts
-const server = "ws://net.studiovibi.com:8080"; // optional
 const room = "walkers";
 
 const game = new VibiNet.game<State, Post>({
-  server,
   room,
   initial,
   on_tick,
@@ -268,8 +285,9 @@ const game = new VibiNet.game<State, Post>({
 });
 ```
 
-If you omit `server`, it defaults to `ws://net.studiovibi.com:8080`. You can
-point it at any WebSocket server that speaks the VibiNet protocol.
+If you omit `server`, it defaults to `wss://net.studiovibi.com`
+(official host: `net.studiovibi.com`). You can point it at any WebSocket
+server that speaks the VibiNet protocol.
 If you don't want smoothing, omit the `smooth` field.
 
 Every player in the same room must use **identical** logic and config. If they
@@ -308,13 +326,47 @@ To run your own server:
 bun run src/server.ts
 ```
 
-This starts a server on port 8080 that also serves the Walkers demo.
+This starts a server on `0.0.0.0:8080` by default and also serves the Walkers
+demo.
+
+For production, run it behind a reverse proxy on `80/443` and keep the VibiNet
+process on localhost only:
+
+```bash
+HOST=127.0.0.1 PORT=8080 bun run src/server.ts
+```
+
+Then proxy `wss://your-domain` -> `ws://127.0.0.1:8080`.
 
 To connect a client to your self‑hosted server:
 
 ```ts
-const game = new VibiNet.game({ server: "ws://<ip>:8080", ... });
+const game = new VibiNet.game({ server: "wss://<your-domain>", ... });
 ```
+
+### Auto‑Sync From GitHub (main)
+
+If you want the server to stay in sync with your GitHub `main` branch
+automatically, use the setup script below once from your local machine:
+
+```bash
+REMOTE_HOST=ubuntu@<server-ip> \
+REMOTE_DIR=/home/ubuntu/vibinet \
+REPO_URL=https://github.com/<owner>/<repo> \
+BRANCH=main \
+scripts/setup-auto-sync.sh
+```
+
+This installs `vibinet-sync.timer` on the server. The timer periodically:
+- fetches `origin/main`,
+- hard-syncs the working tree to that commit,
+- runs `bun install`,
+- restarts `vibinet.service`.
+
+Important:
+- The server mirrors `main` exactly. Uncommitted local changes are never deployed.
+- Always test the public endpoint (HTTPS page + WSS connection) after each push.
+- Never hardcode `ws://` for non-localhost browser clients.
 
 Posts are stored in `db/<room>.dat` and `db/<room>.idx` (append‑only). Delete
 those files to reset a room.

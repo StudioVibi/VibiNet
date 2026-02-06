@@ -4,6 +4,8 @@ import { readFile as read_file } from "fs/promises";
 import { decode_message, encode_message } from "./protocol.ts";
 import { append_post, ensure_db_dir, for_each_post } from "./storage.ts";
 
+declare const Bun: any;
+
 // Build walkers bundle on startup (idempotent)
 async function build_walkers() {
   try {
@@ -53,6 +55,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 const wss = new WebSocketServer({ server });
+const port = Number(process.env.PORT ?? 8080);
+const host = process.env.HOST ?? "0.0.0.0";
 
 function now(): number {
   return Math.floor(Date.now());
@@ -166,6 +170,6 @@ wss.on("connection", (ws) => {
   });
 });
 
-server.listen(8080, () => {
-  console.log("Server running at http://localhost:8080 (HTTP + WebSocket)");
+server.listen(port, host, () => {
+  console.log(`Server running at http://${host}:${port} (HTTP + WebSocket)`);
 });
