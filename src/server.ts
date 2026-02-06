@@ -74,6 +74,22 @@ type ConnectionState = {
 
 const watchers = new Map<string, Set<WebSocket>>();
 const connection_states = new WeakMap<WebSocket, ConnectionState>();
+const connection_liveness = new WeakMap<WebSocket, boolean>();
+
+const ws_heartbeat_interval_id = setInterval(() => {
+  for (const ws of wss.clients) {
+    if (ws.readyState !== WebSocket.OPEN) {
+      continue;
+    }
+    const is_alive = connection_liveness.get(ws);
+    if (is_alive === false) {
+      ws.terminate();
+      continue;
+    }
+    connection_liveness.set(ws, false);
+    ws.ping();
+  }
+}, 30000);
 
 setInterval(() => {
   console.log("Server time:", now());
@@ -200,6 +216,11 @@ function drain_room(
 }
 
 wss.on("connection", (ws) => {
+  connection_liveness.set(ws, true);
+  ws.on("pong", () => {
+    connection_liveness.set(ws, true);
+  });
+
   ws.on("message", (buffer) => {
     const message = decode_message(as_uint8_array(buffer));
     switch (message.$) {
@@ -272,6 +293,7 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("close", () => {
+    connection_liveness.delete(ws);
     const conn = connection_states.get(ws);
     if (!conn) {
       return;
@@ -283,6 +305,10 @@ wss.on("connection", (ws) => {
     }
     connection_states.delete(ws);
   });
+});
+
+server.on("close", () => {
+  clearInterval(ws_heartbeat_interval_id);
 });
 
 server.listen(port, host, () => {

@@ -312,6 +312,11 @@ game.on_sync(() => {
 const state = game.compute_render_state();
 ```
 
+If a websocket drops (idle tab, network change, sleep/wake), the client
+reconnects automatically and re-subscribes watched rooms. The room stream is
+replayed by index order, so state converges again after reconnect. Posts created
+while offline are queued and flushed on reconnect.
+
 Rendering is up to you — VibiNet only computes state.
 
 ## Self‑Hosting
