@@ -362,6 +362,7 @@ This installs `vibinet-sync.timer` on the server. The timer periodically:
 - hard-syncs the working tree to that commit,
 - runs `bun install`,
 - restarts `vibinet.service`.
+- runs `scripts/sync-main.sh` from the repo (single source of truth).
 
 Important:
 - The server mirrors `main` exactly. Uncommitted local changes are never deployed.

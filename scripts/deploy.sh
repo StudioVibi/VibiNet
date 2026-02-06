@@ -4,7 +4,7 @@ set -euo pipefail
 # Manual deploy fallback.
 # Recommended production flow is scripts/setup-auto-sync.sh + pushes to main.
 
-REMOTE_HOST="vibi"
+REMOTE_HOST="vibibr"
 REMOTE_DIR="${REMOTE_DIR:-~/vibinet}"
 
 echo "[DEPLOY] Syncing repo to ${REMOTE_HOST}:${REMOTE_DIR}"
