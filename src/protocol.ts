@@ -9,6 +9,8 @@
 // - load: { room, from }
 // - watch: { room }
 // - unwatch: { room }
+// - get_latest_post_index: { room }
+// - info_latest_post_index: { room, latest_index, server_time }
 //
 // The protocol reuses packer for all fields. Payload bytes are encoded
 // as a List of UInt8, so we convert Uint8Array <-> number[] at the edge.
@@ -31,7 +33,14 @@ type WireMessage =
     }
   | { $: "load"; room: string; from: number }
   | { $: "watch"; room: string }
-  | { $: "unwatch"; room: string };
+  | { $: "unwatch"; room: string }
+  | { $: "get_latest_post_index"; room: string }
+  | {
+      $: "info_latest_post_index";
+      room: string;
+      latest_index: number;
+      server_time: number;
+    };
 
 export type Message =
   | { $: "get_time" }
@@ -48,7 +57,14 @@ export type Message =
     }
   | { $: "load"; room: string; from: number }
   | { $: "watch"; room: string }
-  | { $: "unwatch"; room: string };
+  | { $: "unwatch"; room: string }
+  | { $: "get_latest_post_index"; room: string }
+  | {
+      $: "info_latest_post_index";
+      room: string;
+      latest_index: number;
+      server_time: number;
+    };
 
 const TIME_BITS = 53;
 const BYTE_LIST_PACKED: Packed = { $: "List", type: { $: "UInt", size: 8 } };
@@ -100,6 +116,20 @@ const MESSAGE_PACKED: Packed = {
       $: "Struct",
       fields: {
         room: { $: "String" },
+      },
+    },
+    get_latest_post_index: {
+      $: "Struct",
+      fields: {
+        room: { $: "String" },
+      },
+    },
+    info_latest_post_index: {
+      $: "Struct",
+      fields: {
+        room: { $: "String" },
+        latest_index: { $: "Int", size: 32 },
+        server_time: { $: "UInt", size: TIME_BITS },
       },
     },
   },

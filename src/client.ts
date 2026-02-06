@@ -5,11 +5,21 @@ import { OFFICIAL_SERVER_URL, normalize_ws_url } from "./server_url.ts";
 export type ClientApi<P> = {
   on_sync: (callback: () => void) => void;
   watch: (room: string, packer: Packed, handler?: (post: any) => void) => void;
-  load: (room: string, from: number, packer: Packed) => void;
+  load: (
+    room: string,
+    from: number,
+    packer: Packed,
+    handler?: (post: any) => void
+  ) => void;
+  get_latest_post_index?: (room: string) => void;
+  on_latest_post_index?: (
+    callback: (info: { room: string; latest_index: number; server_time: number }) => void
+  ) => void;
   post: (room: string, data: P, packer: Packed) => string;
   server_time: () => number;
   ping: () => number;
   close: () => void;
+  debug_dump?: () => unknown;
 };
 
 type TimeSync = {
@@ -24,6 +34,21 @@ type RoomWatcher = { handler?: MessageHandler; packer: Packed };
 
 function now(): number {
   return Math.floor(Date.now());
+}
+
+function ws_state_name(ready_state: number): string {
+  switch (ready_state) {
+    case WebSocket.CONNECTING:
+      return "CONNECTING";
+    case WebSocket.OPEN:
+      return "OPEN";
+    case WebSocket.CLOSING:
+      return "CLOSING";
+    case WebSocket.CLOSED:
+      return "CLOSED";
+    default:
+      return `UNKNOWN(${ready_state})`;
+  }
 }
 
 function default_ws_url(): string {
@@ -60,8 +85,12 @@ export function create_client<P>(server?: string): ClientApi<P> {
   };
 
   const room_watchers = new Map<string, RoomWatcher>();
+  const latest_post_index_listeners: Array<
+    (info: { room: string; latest_index: number; server_time: number }) => void
+  > = [];
   let is_synced = false;
   const sync_listeners: Array<() => void> = [];
+  let heartbeat_id: ReturnType<typeof setInterval> | null = null;
 
   const ws_url = normalize_ws_url(server ?? default_ws_url());
   const ws = new WebSocket(ws_url);
@@ -85,6 +114,14 @@ export function create_client<P>(server?: string): ClientApi<P> {
     ws.send(buf);
   }
 
+  function send_time_request_if_open(): void {
+    if (ws.readyState !== WebSocket.OPEN) {
+      return;
+    }
+    time_sync.request_sent_at = now();
+    ws.send(encode_message({ $: "get_time" }));
+  }
+
   function register_handler(room: string, packer: Packed, handler?: MessageHandler): void {
     const existing = room_watchers.get(room);
     if (existing) {
@@ -101,12 +138,11 @@ export function create_client<P>(server?: string): ClientApi<P> {
 
   ws.addEventListener("open", () => {
     console.log("[WS] Connected");
-    time_sync.request_sent_at = now();
-    send(encode_message({ $: "get_time" }));
-    setInterval(() => {
-      time_sync.request_sent_at = now();
-      send(encode_message({ $: "get_time" }));
-    }, 2000);
+    send_time_request_if_open();
+    if (heartbeat_id !== null) {
+      clearInterval(heartbeat_id);
+    }
+    heartbeat_id = setInterval(send_time_request_if_open, 2000);
   });
 
   ws.addEventListener("message", (event) => {
@@ -155,6 +191,23 @@ export function create_client<P>(server?: string): ClientApi<P> {
         }
         break;
       }
+      case "info_latest_post_index": {
+        for (const cb of latest_post_index_listeners) {
+          cb({
+            room: msg.room,
+            latest_index: msg.latest_index,
+            server_time: msg.server_time,
+          });
+        }
+        break;
+      }
+    }
+  });
+
+  ws.addEventListener("close", () => {
+    if (heartbeat_id !== null) {
+      clearInterval(heartbeat_id);
+      heartbeat_id = null;
     }
   });
 
@@ -170,9 +223,15 @@ export function create_client<P>(server?: string): ClientApi<P> {
       register_handler(room, packer, handler);
       send(encode_message({ $: "watch", room }));
     },
-    load: (room, from, packer) => {
-      register_handler(room, packer);
+    load: (room, from, packer, handler) => {
+      register_handler(room, packer, handler);
       send(encode_message({ $: "load", room, from }));
+    },
+    get_latest_post_index: (room) => {
+      send(encode_message({ $: "get_latest_post_index", room }));
+    },
+    on_latest_post_index: (callback) => {
+      latest_post_index_listeners.push(callback);
     },
     post: (room, data, packer) => {
       const name = gen_name();
@@ -182,6 +241,28 @@ export function create_client<P>(server?: string): ClientApi<P> {
     },
     server_time,
     ping: () => time_sync.last_ping,
-    close: () => ws.close(),
+    close: () => {
+      if (heartbeat_id !== null) {
+        clearInterval(heartbeat_id);
+        heartbeat_id = null;
+      }
+      ws.close();
+    },
+    debug_dump: () => ({
+      ws_url,
+      ws_ready_state: ws.readyState,
+      ws_ready_state_name: ws_state_name(ws.readyState),
+      is_synced,
+      room_watchers: Array.from(room_watchers.keys()),
+      room_watcher_count: room_watchers.size,
+      latest_post_index_listener_count: latest_post_index_listeners.length,
+      sync_listener_count: sync_listeners.length,
+      time_sync: {
+        clock_offset: time_sync.clock_offset,
+        lowest_ping: time_sync.lowest_ping,
+        request_sent_at: time_sync.request_sent_at,
+        last_ping: time_sync.last_ping,
+      },
+    }),
   };
 }

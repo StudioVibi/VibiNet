@@ -12,18 +12,28 @@ Clients replay the same input stream and compute the same game state.
 - `src/vibi.ts`: deterministic replay engine.
 - `src/client.ts`: WebSocket client, room ops, and time sync.
 - `src/index.ts`: public package exports.
+- `test/desync_regression.test.ts`: regression tests for desync root cause.
 
 ### Protocol and encoding
 
 - `src/packer.ts`: bit-level schema serializer/deserializer.
 - `src/protocol.ts`: wire message schema and adapters.
 - `src/binary.ts`: binary helpers used by storage/protocol internals.
+- Protocol includes latest-index checkpoint messages used by replay safety.
 
 ### Server side
 
 - `src/server.ts`: Bun HTTP + WebSocket server.
 - `src/storage.ts`: append-only room persistence.
 - `src/server_url.ts`: official endpoint constant and URL normalization.
+- Server streams room posts with per-connection ordered contiguous cursors.
+
+### Replay safety model
+
+- Client tracks `no_pending_posts_before_ms` in `src/vibi.ts`.
+- `compute_state_at` is clamped so pruning never crosses unknown history.
+- If a post arrives before the cache window, cache is invalidated loudly;
+  posts are not silently dropped.
 
 ### Demo app
 

@@ -77,15 +77,22 @@ export type ClientProfile = {
 
 type WatchHandler<P> = (post: SimPost<P>) => void;
 
+type StreamState = {
+  watching: boolean;
+  next_to_send: number;
+};
+
 export class SimServer<P> {
   scheduler: SimScheduler;
   posts_by_room: Map<string, SimPost<P>[]>;
   watchers: Map<string, Set<SimClient<P>>>;
+  streams: Map<SimClient<P>, Map<string, StreamState>>;
 
   constructor(scheduler: SimScheduler) {
     this.scheduler = scheduler;
     this.posts_by_room = new Map();
     this.watchers = new Map();
+    this.streams = new Map();
   }
 
   watch(room: string, client: SimClient<P>): void {
@@ -95,13 +102,18 @@ export class SimServer<P> {
       this.watchers.set(room, set);
     }
     set.add(client);
+    const stream = this.get_stream_state(room, client);
+    stream.watching = true;
+    this.drain(room, client, stream);
   }
 
   load(room: string, from: number, client: SimClient<P>): void {
-    const posts = this.posts_by_room.get(room) ?? [];
-    for (let index = from; index < posts.length; index++) {
-      client.schedule_delivery(posts[index]);
-    }
+    const stream = this.get_stream_state(room, client);
+    stream.next_to_send = Math.max(stream.next_to_send, Math.max(0, from));
+    const one_shot_limit = stream.watching
+      ? undefined
+      : this.get_posts(room).length;
+    this.drain(room, client, stream, one_shot_limit);
   }
 
   receive_post(
@@ -127,12 +139,43 @@ export class SimServer<P> {
       return;
     }
     for (const client of watchers) {
-      client.schedule_delivery(post);
+      const stream = this.get_stream_state(room, client);
+      this.drain(room, client, stream);
     }
   }
 
   get_posts(room: string): SimPost<P>[] {
     return this.posts_by_room.get(room) ?? [];
+  }
+
+  private get_stream_state(room: string, client: SimClient<P>): StreamState {
+    let rooms = this.streams.get(client);
+    if (!rooms) {
+      rooms = new Map();
+      this.streams.set(client, rooms);
+    }
+    let stream = rooms.get(room);
+    if (!stream) {
+      stream = { watching: false, next_to_send: 0 };
+      rooms.set(room, stream);
+    }
+    return stream;
+  }
+
+  private drain(
+    room: string,
+    client: SimClient<P>,
+    stream: StreamState,
+    max_index_exclusive?: number
+  ): void {
+    const posts = this.get_posts(room);
+    const limit = max_index_exclusive === undefined
+      ? posts.length
+      : Math.min(posts.length, max_index_exclusive);
+    while (stream.next_to_send < limit) {
+      client.schedule_delivery(posts[stream.next_to_send]);
+      stream.next_to_send += 1;
+    }
   }
 }
 
@@ -157,6 +200,9 @@ export class SimClient<P> {
   profile: ClientProfile;
   network: SimNetwork<P>;
   handlers: Map<string, WatchHandler<P>>;
+  latest_post_index_listeners: Array<
+    (info: { room: string; latest_index: number; server_time: number }) => void
+  >;
   last_ping: number;
   private seq = 0;
   private uplink_ready_at = 0;
@@ -167,6 +213,7 @@ export class SimClient<P> {
     this.profile = profile;
     this.network = network;
     this.handlers = new Map();
+    this.latest_post_index_listeners = [];
     this.last_ping = Infinity;
   }
 
@@ -207,6 +254,32 @@ export class SimClient<P> {
 
   load(room: string, from: number, _packed: any): void {
     this.network.server.load(room, from, this);
+  }
+
+  get_latest_post_index(room: string): void {
+    const one_way = this.sample_one_way(this.profile.downlink_ms);
+    const deliver_at = Math.max(
+      this.network.scheduler.now + one_way,
+      this.downlink_ready_at
+    );
+    this.downlink_ready_at = deliver_at;
+    this.network.scheduler.schedule_at(deliver_at, () => {
+      const latest_index = this.network.server.get_posts(room).length - 1;
+      const info = {
+        room,
+        latest_index,
+        server_time: this.network.scheduler.now,
+      };
+      for (const listener of this.latest_post_index_listeners) {
+        listener(info);
+      }
+    });
+  }
+
+  on_latest_post_index(
+    callback: (info: { room: string; latest_index: number; server_time: number }) => void
+  ): void {
+    this.latest_post_index_listeners.push(callback);
   }
 
   schedule_delivery(post: SimPost<P>): void {

@@ -161,6 +161,38 @@ export function append_post(room: string, post: StoredPost): number {
   return store.offsets.length - 1;
 }
 
+export function get_post_count(room: string): number {
+  const store = get_room_store(room);
+  return store.offsets.length;
+}
+
+export function get_post(room: string, index: number): StoredPost | null {
+  const store = get_room_store(room);
+  if (index < 0 || index >= store.offsets.length) {
+    return null;
+  }
+  if (!exists_sync(store.dat_path)) {
+    return null;
+  }
+
+  const offset = store.offsets[index];
+  const fd = open_sync(store.dat_path, "r");
+  const len_buf = Buffer.allocUnsafe(4);
+  try {
+    read_sync(fd, len_buf, 0, 4, offset);
+    const len = new DataView(
+      len_buf.buffer,
+      len_buf.byteOffset,
+      len_buf.byteLength
+    ).getUint32(0, true);
+    const rec_buf = Buffer.allocUnsafe(len);
+    read_sync(fd, rec_buf, 0, len, offset + 4);
+    return decode_record(rec_buf);
+  } finally {
+    close_sync(fd);
+  }
+}
+
 export function for_each_post(
   room: string,
   from: number,

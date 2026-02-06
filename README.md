@@ -67,6 +67,9 @@ Under the hood (short):
   late post arrives, VibiNet rewinds to that tick and replays forward.
 - **Snapshot caching.** Recent state snapshots are cached in a bounded window
   so rollback and replay stay fast.
+- **Gapless ingest + safe pruning.** The stream is applied in contiguous index
+  order, and cache pruning is clamped by a completeness frontier so no history
+  event is silently discarded.
 - **Compact binary.** Posts are encoded with your `packer` and stored/sent as
   raw bytes.
 

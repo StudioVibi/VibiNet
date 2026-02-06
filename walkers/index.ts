@@ -199,6 +199,27 @@ const game = new VibiNet.game<State, Post>({
   smooth,
 });
 
+declare global {
+  interface Window {
+    DEBUG_DUMP: () => VibiNet.DebugDump<State, Post>;
+    RECOMPUTE: (at_tick?: number) => VibiNet.RecomputeDump<State>;
+  }
+}
+
+window.DEBUG_DUMP = () => {
+  const dump = game.debug_dump();
+  console.log("[VIBI] DEBUG_DUMP", dump);
+  return dump;
+};
+
+window.RECOMPUTE = (at_tick?: number) => {
+  const result = game.debug_recompute(at_tick);
+  console.log("[VIBI] RECOMPUTE", result);
+  return result;
+};
+
+console.log("[VIBI] DEBUG_DUMP() and RECOMPUTE() are available in the console.");
+
 document.title = `Walkers ${pkg.version}`;
 
 const key_states: Record<"w" | "a" | "s" | "d", boolean> = {

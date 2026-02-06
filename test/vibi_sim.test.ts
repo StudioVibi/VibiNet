@@ -165,7 +165,21 @@ function create_recording_client(client: SimClient<Post>) {
         }
       });
     },
-    load: (room: string, from: number, packed: any) => client.load(room, from, packed),
+    load: (
+      room: string,
+      from: number,
+      packed: any,
+      handler?: (post: SimPost<Post>) => void
+    ) => {
+      if (handler) {
+        client.handlers.set(room, handler);
+      }
+      client.load(room, from, packed);
+    },
+    get_latest_post_index: (room: string) => client.get_latest_post_index(room),
+    on_latest_post_index: (
+      callback: (info: { room: string; latest_index: number; server_time: number }) => void
+    ) => client.on_latest_post_index(callback),
     post: (room: string, data: Post, packed: any) => client.post(room, data, packed),
     server_time: () => client.server_time(),
     ping: () => client.ping(),

@@ -2,7 +2,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import http from "http";
 import { readFile as read_file } from "fs/promises";
 import { decode_message, encode_message } from "./protocol.ts";
-import { append_post, ensure_db_dir, for_each_post } from "./storage.ts";
+import { append_post, ensure_db_dir, get_post, get_post_count } from "./storage.ts";
 
 declare const Bun: any;
 
@@ -62,7 +62,18 @@ function now(): number {
   return Math.floor(Date.now());
 }
 
+type RoomStreamState = {
+  watching: boolean;
+  next_to_send: number;
+  drain_active: boolean;
+};
+
+type ConnectionState = {
+  rooms: Map<string, RoomStreamState>;
+};
+
 const watchers = new Map<string, Set<WebSocket>>();
+const connection_states = new WeakMap<WebSocket, ConnectionState>();
 
 setInterval(() => {
   console.log("Server time:", now());
@@ -81,6 +92,111 @@ function as_uint8_array(data: unknown): Uint8Array {
     return new TextEncoder().encode(data);
   }
   return new Uint8Array(data as ArrayBufferLike);
+}
+
+function get_connection_state(ws: WebSocket): ConnectionState {
+  let state = connection_states.get(ws);
+  if (state) {
+    return state;
+  }
+  state = { rooms: new Map() };
+  connection_states.set(ws, state);
+  return state;
+}
+
+function get_room_stream_state(ws: WebSocket, room: string): RoomStreamState {
+  const conn = get_connection_state(ws);
+  let room_state = conn.rooms.get(room);
+  if (room_state) {
+    return room_state;
+  }
+  room_state = {
+    watching: false,
+    next_to_send: 0,
+    drain_active: false,
+  };
+  conn.rooms.set(room, room_state);
+  return room_state;
+}
+
+function remove_watcher(ws: WebSocket, room: string): void {
+  const set = watchers.get(room);
+  if (!set) {
+    return;
+  }
+  set.delete(ws);
+  if (set.size === 0) {
+    watchers.delete(room);
+  }
+}
+
+function add_watcher(ws: WebSocket, room: string): void {
+  let set = watchers.get(room);
+  if (!set) {
+    set = new Set();
+    watchers.set(room, set);
+  }
+  set.add(ws);
+}
+
+function send_info_post(
+  ws: WebSocket,
+  room: string,
+  index: number,
+  post: {
+    server_time: number;
+    client_time: number;
+    name: string;
+    payload: Uint8Array;
+  }
+): void {
+  ws.send(
+    encode_message({
+      $: "info_post",
+      room,
+      index,
+      server_time: post.server_time,
+      client_time: post.client_time,
+      name: post.name,
+      payload: post.payload,
+    })
+  );
+}
+
+function drain_room(
+  ws: WebSocket,
+  room: string,
+  state: RoomStreamState,
+  max_index_exclusive?: number
+): void {
+  if (state.drain_active) {
+    return;
+  }
+  if (ws.readyState !== WebSocket.OPEN) {
+    return;
+  }
+
+  state.drain_active = true;
+  try {
+    for (;;) {
+      const next = state.next_to_send;
+      const count = get_post_count(room);
+      const limit = max_index_exclusive === undefined
+        ? count
+        : Math.min(count, max_index_exclusive);
+      if (next >= limit) {
+        break;
+      }
+      const post = get_post(room, next);
+      if (!post) {
+        break;
+      }
+      send_info_post(ws, room, next, post);
+      state.next_to_send = next + 1;
+    }
+  } finally {
+    state.drain_active = false;
+  }
 }
 
 wss.on("connection", (ws) => {
@@ -106,17 +222,9 @@ wss.on("connection", (ws) => {
 
         const room_watchers = watchers.get(room);
         if (room_watchers) {
-          const info = encode_message({
-            $: "info_post",
-            room,
-            index,
-            server_time,
-            client_time,
-            name,
-            payload,
-          });
           for (const watcher of room_watchers) {
-            watcher.send(info);
+            const stream = get_room_stream_state(watcher, room);
+            drain_room(watcher, room, stream);
           }
         }
         break;
@@ -124,49 +232,56 @@ wss.on("connection", (ws) => {
       case "load": {
         const room = message.room;
         const from = Math.max(0, message.from || 0);
-        for_each_post(room, from, (index, post) => {
-          const msg = encode_message({
-            $: "info_post",
-            room,
-            index,
-            server_time: post.server_time,
-            client_time: post.client_time,
-            name: post.name,
-            payload: post.payload,
-          });
-          ws.send(msg);
-        });
+        const stream = get_room_stream_state(ws, room);
+        // Never rewind already-sent indices; preserve contiguous delivery.
+        stream.next_to_send = Math.max(stream.next_to_send, from);
+        const one_shot_limit = stream.watching ? undefined : get_post_count(room);
+        drain_room(ws, room, stream, one_shot_limit);
         break;
       }
       case "watch": {
         const room = message.room;
-        if (!watchers.has(room)) {
-          watchers.set(room, new Set());
-        }
-        watchers.get(room)!.add(ws);
+        const stream = get_room_stream_state(ws, room);
+        stream.watching = true;
+        add_watcher(ws, room);
+        drain_room(ws, room, stream);
         console.log("Watching:", { room });
         break;
       }
       case "unwatch": {
         const room = message.room;
-        const set = watchers.get(room);
-        if (set) {
-          set.delete(ws);
-          if (set.size === 0) {
-            watchers.delete(room);
-          }
-        }
+        const stream = get_room_stream_state(ws, room);
+        stream.watching = false;
+        remove_watcher(ws, room);
         console.log("Unwatching:", { room });
+        break;
+      }
+      case "get_latest_post_index": {
+        const room = message.room;
+        ws.send(
+          encode_message({
+            $: "info_latest_post_index",
+            room,
+            latest_index: get_post_count(room) - 1,
+            server_time: now(),
+          })
+        );
         break;
       }
     }
   });
 
   ws.on("close", () => {
-    for (const [room, set] of watchers.entries()) {
-      set.delete(ws);
-      if (set.size === 0) watchers.delete(room);
+    const conn = connection_states.get(ws);
+    if (!conn) {
+      return;
     }
+    for (const [room, stream] of conn.rooms.entries()) {
+      if (stream.watching) {
+        remove_watcher(ws, room);
+      }
+    }
+    connection_states.delete(ws);
   });
 });
 

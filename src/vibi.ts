@@ -47,8 +47,8 @@ import type { Packed as PackedType } from "./packer.ts";
 // window (add/remove, remote/local), snapshots at or after that tick
 // are dropped immediately. The next compute_state_at rebuilds them
 // forward from the last remaining snapshot. Posts older than the window
-// are ignored, and timeline/post data before snapshot_start_tick is
-// pruned to bound memory.
+// are not discarded: compute_state_at is clamped to a safety frontier so
+// pruning only removes history proven complete from the server.
 //
 // ## Correctness sketch
 // official_tick is deterministic given post fields and config. Remote
@@ -93,6 +93,80 @@ type VibiNetOptions<S, P> = {
   client?: ClientApi<P>;
 };
 
+type DebugPostDump<P> = {
+  room: string;
+  index: number;
+  server_time: number;
+  client_time: number;
+  name?: string;
+  official_time: number;
+  official_tick: number;
+  data: P;
+};
+
+type DebugTimelineBucketDump<P> = {
+  tick: number;
+  remote_count: number;
+  local_count: number;
+  remote_posts: DebugPostDump<P>[];
+  local_posts: DebugPostDump<P>[];
+};
+
+type DebugSnapshotDump<S> = {
+  tick: number;
+  state: S;
+};
+
+export type VibiNetDebugDump<S, P> = {
+  room: string;
+  tick_rate: number;
+  tolerance: number;
+  cache_enabled: boolean;
+  snapshot_stride: number;
+  snapshot_count: number;
+  snapshot_start_tick: number | null;
+  no_pending_posts_before_ms: number | null;
+  max_contiguous_remote_index: number;
+  initial_time: number | null;
+  initial_tick: number | null;
+  max_remote_index: number;
+  post_count: number;
+  server_time: number | null;
+  server_tick: number | null;
+  ping: number;
+  history_truncated: boolean;
+  cache_drop_guard_hits: number;
+  counts: {
+    remote_posts: number;
+    local_posts: number;
+    timeline_ticks: number;
+    snapshots: number;
+  };
+  ranges: {
+    timeline_min_tick: number | null;
+    timeline_max_tick: number | null;
+    snapshot_min_tick: number | null;
+    snapshot_max_tick: number | null;
+    min_remote_index: number | null;
+    max_remote_index: number | null;
+  };
+  remote_posts: DebugPostDump<P>[];
+  local_posts: DebugPostDump<P>[];
+  timeline: DebugTimelineBucketDump<P>[];
+  snapshots: DebugSnapshotDump<S>[];
+  client_debug: unknown;
+};
+
+export type VibiNetRecomputeDump<S> = {
+  target_tick: number;
+  initial_tick: number | null;
+  cache_invalidated: boolean;
+  invalidated_snapshot_count: number;
+  history_truncated: boolean;
+  state: S;
+  notes: string[];
+};
+
 export class VibiNet<S, P> {
   static game = VibiNet;
   room:                string;
@@ -114,6 +188,10 @@ export class VibiNet<S, P> {
   snapshot_start_tick: number | null;
   initial_time_value:  number | null;
   initial_tick_value:  number | null;
+  no_pending_posts_before_ms: number | null;
+  max_contiguous_remote_index: number;
+  cache_drop_guard_hits: number;
+  latest_index_poll_interval_id: ReturnType<typeof setInterval> | null;
   max_remote_index:    number;
 
   // Compute the authoritative time a post takes effect.
@@ -187,6 +265,11 @@ export class VibiNet<S, P> {
     if (!this.cache_enabled) {
       return;
     }
+    const safe_prune_tick = this.safe_prune_tick();
+    if (safe_prune_tick !== null && prune_tick > safe_prune_tick) {
+      this.cache_drop_guard_hits += 1;
+      prune_tick = safe_prune_tick;
+    }
     for (const tick of this.timeline.keys()) {
       if (tick < prune_tick) {
         this.timeline.delete(tick);
@@ -201,6 +284,87 @@ export class VibiNet<S, P> {
       if (this.official_tick(post) < prune_tick) {
         this.local_posts.delete(name);
       }
+    }
+  }
+
+  private tick_ms(): number {
+    return 1000 / this.tick_rate;
+  }
+
+  private cache_window_ticks(): number {
+    return this.snapshot_stride * Math.max(0, this.snapshot_count - 1);
+  }
+
+  private safe_prune_tick(): number | null {
+    if (this.no_pending_posts_before_ms === null) {
+      return null;
+    }
+    return this.time_to_tick(this.no_pending_posts_before_ms);
+  }
+
+  private safe_compute_tick(requested_tick: number): number {
+    if (!this.cache_enabled) {
+      return requested_tick;
+    }
+    const safe_prune_tick = this.safe_prune_tick();
+    if (safe_prune_tick === null) {
+      return requested_tick;
+    }
+    const safe_tick =
+      safe_prune_tick +
+      this.cache_window_ticks();
+    return Math.min(requested_tick, safe_tick);
+  }
+
+  private advance_no_pending_posts_before_ms(candidate: number): void {
+    const bounded = Math.max(0, Math.floor(candidate));
+    if (
+      this.no_pending_posts_before_ms === null ||
+      bounded > this.no_pending_posts_before_ms
+    ) {
+      this.no_pending_posts_before_ms = bounded;
+    }
+  }
+
+  private advance_contiguous_remote_frontier(): void {
+    for (;;) {
+      const next_index = this.max_contiguous_remote_index + 1;
+      const post = this.remote_posts.get(next_index);
+      if (!post) {
+        break;
+      }
+      this.max_contiguous_remote_index = next_index;
+      this.advance_no_pending_posts_before_ms(this.official_time(post));
+    }
+  }
+
+  private on_latest_post_index_info(info: {
+    room: string;
+    latest_index: number;
+    server_time: number;
+  }): void {
+    if (info.room !== this.room) {
+      return;
+    }
+    if (info.latest_index > this.max_contiguous_remote_index) {
+      return;
+    }
+    const conservative_margin = this.tick_ms();
+    const candidate =
+      info.server_time -
+      this.tolerance -
+      conservative_margin;
+    this.advance_no_pending_posts_before_ms(candidate);
+  }
+
+  private request_latest_post_index(): void {
+    if (!this.client_api.get_latest_post_index) {
+      return;
+    }
+    try {
+      this.client_api.get_latest_post_index(this.room);
+    } catch {
+      // Socket may be temporarily unavailable. Retry on next poll.
     }
   }
 
@@ -269,25 +433,25 @@ export class VibiNet<S, P> {
       this.initial_tick_value = this.time_to_tick(t);
     }
 
+    if (this.remote_posts.has(post.index)) {
+      return;
+    }
+
     const before_window =
       this.cache_enabled &&
       this.snapshot_start_tick !== null &&
       tick < this.snapshot_start_tick;
     if (before_window) {
-      if (post.index > this.max_remote_index) {
-        this.max_remote_index = post.index;
-      }
-      return;
-    }
-
-    if (this.remote_posts.has(post.index)) {
-      return;
+      this.cache_drop_guard_hits += 1;
+      this.snapshots.clear();
+      this.snapshot_start_tick = null;
     }
 
     this.remote_posts.set(post.index, post);
     if (post.index > this.max_remote_index) {
       this.max_remote_index = post.index;
     }
+    this.advance_contiguous_remote_frontier();
     this.insert_remote_post(post, tick);
     this.invalidate_from_tick(tick);
   }
@@ -304,7 +468,9 @@ export class VibiNet<S, P> {
       this.snapshot_start_tick !== null &&
       tick < this.snapshot_start_tick;
     if (before_window) {
-      return;
+      this.cache_drop_guard_hits += 1;
+      this.snapshots.clear();
+      this.snapshot_start_tick = null;
     }
     this.local_posts.set(name, post);
     this.get_bucket(tick).local.push(post);
@@ -363,6 +529,47 @@ export class VibiNet<S, P> {
     return state;
   }
 
+  private post_to_debug_dump(post: Post<P>): DebugPostDump<P> {
+    return {
+      room: post.room,
+      index: post.index,
+      server_time: post.server_time,
+      client_time: post.client_time,
+      name: post.name,
+      official_time: this.official_time(post),
+      official_tick: this.official_tick(post),
+      data: post.data,
+    };
+  }
+
+  private timeline_tick_bounds(): { min: number | null; max: number | null } {
+    let min: number | null = null;
+    let max: number | null = null;
+    for (const tick of this.timeline.keys()) {
+      if (min === null || tick < min) {
+        min = tick;
+      }
+      if (max === null || tick > max) {
+        max = tick;
+      }
+    }
+    return { min, max };
+  }
+
+  private snapshot_tick_bounds(): { min: number | null; max: number | null } {
+    let min: number | null = null;
+    let max: number | null = null;
+    for (const tick of this.snapshots.keys()) {
+      if (min === null || tick < min) {
+        min = tick;
+      }
+      if (max === null || tick > max) {
+        max = tick;
+      }
+    }
+    return { min, max };
+  }
+
   // Create a VibiNet instance and hook the client sync/load/watch callbacks.
   constructor(options: VibiNetOptions<S, P>) {
     const default_smooth = (remote: S, _local: S): S => remote;
@@ -394,23 +601,40 @@ export class VibiNet<S, P> {
     this.snapshot_start_tick  = null;
     this.initial_time_value   = null;
     this.initial_tick_value   = null;
+    this.no_pending_posts_before_ms = null;
+    this.max_contiguous_remote_index = -1;
+    this.cache_drop_guard_hits = 0;
+    this.latest_index_poll_interval_id = null;
     this.max_remote_index     = -1;
+
+    if (this.client_api.on_latest_post_index) {
+      this.client_api.on_latest_post_index((info) => {
+        this.on_latest_post_index_info(info);
+      });
+    }
 
     // Wait for initial time sync before interacting with server
     this.client_api.on_sync(() => {
-      console.log(`[VIBI] synced; watching+loading room=${this.room}`);
-      // Watch the room with callback.
-      this.client_api.watch(this.room, this.packer, (post) => {
+      console.log(`[VIBI] synced; loading+watching room=${this.room}`);
+      const on_info_post = (post: Post<P>) => {
         // If this official post matches a local predicted one, drop the local
         // copy.
         if (post.name) {
           this.remove_local_post(post.name);
         }
         this.add_remote_post(post);
-      });
+      };
 
-      // Load all existing posts
-      this.client_api.load(this.room, 0, this.packer);
+      // Load all existing posts before enabling live stream.
+      this.client_api.load(this.room, 0, this.packer, on_info_post);
+      this.client_api.watch(this.room, this.packer, on_info_post);
+      this.request_latest_post_index();
+      if (this.latest_index_poll_interval_id !== null) {
+        clearInterval(this.latest_index_poll_interval_id);
+      }
+      this.latest_index_poll_interval_id = setInterval(() => {
+        this.request_latest_post_index();
+      }, 2000);
     });
   }
 
@@ -482,6 +706,7 @@ export class VibiNet<S, P> {
 
   // Compute state at an arbitrary tick, using snapshots when enabled.
   compute_state_at(at_tick: number): S {
+    at_tick = this.safe_compute_tick(at_tick);
     const initial_tick = this.initial_tick();
 
     if (initial_tick === null) {
@@ -517,6 +742,171 @@ export class VibiNet<S, P> {
     return this.advance_state(base_state, snap_tick, at_tick);
   }
 
+  debug_dump(): VibiNetDebugDump<S, P> {
+    const remote_posts = Array
+      .from(this.remote_posts.values())
+      .sort((a, b) => a.index - b.index)
+      .map((post) => this.post_to_debug_dump(post));
+    const local_posts = Array
+      .from(this.local_posts.values())
+      .sort((a, b) => {
+        const ta = this.official_tick(a);
+        const tb = this.official_tick(b);
+        if (ta !== tb) {
+          return ta - tb;
+        }
+        const na = a.name ?? "";
+        const nb = b.name ?? "";
+        return na.localeCompare(nb);
+      })
+      .map((post) => this.post_to_debug_dump(post));
+    const timeline = Array
+      .from(this.timeline.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([tick, bucket]) => ({
+        tick,
+        remote_count: bucket.remote.length,
+        local_count: bucket.local.length,
+        remote_posts: bucket.remote.map((post) => this.post_to_debug_dump(post)),
+        local_posts: bucket.local.map((post) => this.post_to_debug_dump(post)),
+      }));
+    const snapshots = Array
+      .from(this.snapshots.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([tick, state]) => ({ tick, state }));
+
+    const initial_time = this.initial_time();
+    const initial_tick = this.initial_tick();
+    const timeline_bounds = this.timeline_tick_bounds();
+    const snapshot_bounds = this.snapshot_tick_bounds();
+    const history_truncated =
+      initial_tick !== null &&
+      timeline_bounds.min !== null &&
+      timeline_bounds.min > initial_tick;
+
+    let server_time: number | null = null;
+    let server_tick: number | null = null;
+    try {
+      server_time = this.server_time();
+      server_tick = this.server_tick();
+    } catch {
+      server_time = null;
+      server_tick = null;
+    }
+
+    let min_remote_index: number | null = null;
+    let max_remote_index: number | null = null;
+    for (const index of this.remote_posts.keys()) {
+      if (min_remote_index === null || index < min_remote_index) {
+        min_remote_index = index;
+      }
+      if (max_remote_index === null || index > max_remote_index) {
+        max_remote_index = index;
+      }
+    }
+
+    const client_debug =
+      typeof this.client_api.debug_dump === "function"
+        ? this.client_api.debug_dump()
+        : null;
+
+    return {
+      room: this.room,
+      tick_rate: this.tick_rate,
+      tolerance: this.tolerance,
+      cache_enabled: this.cache_enabled,
+      snapshot_stride: this.snapshot_stride,
+      snapshot_count: this.snapshot_count,
+      snapshot_start_tick: this.snapshot_start_tick,
+      no_pending_posts_before_ms: this.no_pending_posts_before_ms,
+      max_contiguous_remote_index: this.max_contiguous_remote_index,
+      initial_time,
+      initial_tick,
+      max_remote_index: this.max_remote_index,
+      post_count: this.post_count(),
+      server_time,
+      server_tick,
+      ping: this.ping(),
+      history_truncated,
+      cache_drop_guard_hits: this.cache_drop_guard_hits,
+      counts: {
+        remote_posts: this.remote_posts.size,
+        local_posts: this.local_posts.size,
+        timeline_ticks: this.timeline.size,
+        snapshots: this.snapshots.size,
+      },
+      ranges: {
+        timeline_min_tick: timeline_bounds.min,
+        timeline_max_tick: timeline_bounds.max,
+        snapshot_min_tick: snapshot_bounds.min,
+        snapshot_max_tick: snapshot_bounds.max,
+        min_remote_index,
+        max_remote_index,
+      },
+      remote_posts,
+      local_posts,
+      timeline,
+      snapshots,
+      client_debug,
+    };
+  }
+
+  debug_recompute(at_tick?: number): VibiNetRecomputeDump<S> {
+    const initial_tick = this.initial_tick();
+    const timeline_bounds = this.timeline_tick_bounds();
+    const history_truncated =
+      initial_tick !== null &&
+      timeline_bounds.min !== null &&
+      timeline_bounds.min > initial_tick;
+
+    let target_tick = at_tick;
+    if (target_tick === undefined) {
+      try {
+        target_tick = this.server_tick();
+      } catch {
+        target_tick = undefined;
+      }
+    }
+    if (target_tick === undefined) {
+      target_tick = initial_tick ?? 0;
+    }
+
+    const invalidated_snapshot_count = this.snapshots.size;
+    this.snapshots.clear();
+    this.snapshot_start_tick = null;
+
+    const notes: string[] = [];
+    if (history_truncated) {
+      notes.push(
+        "Local history before timeline_min_tick was pruned; full room replay may be impossible without reloading posts."
+      );
+    }
+
+    if (initial_tick === null || target_tick < initial_tick) {
+      notes.push("No replayable post range available at target tick.");
+      return {
+        target_tick,
+        initial_tick,
+        cache_invalidated: true,
+        invalidated_snapshot_count,
+        history_truncated,
+        state: this.init,
+        notes,
+      };
+    }
+
+    const state = this.compute_state_at_uncached(initial_tick, target_tick);
+    return {
+      target_tick,
+      initial_tick,
+      cache_invalidated: true,
+      invalidated_snapshot_count,
+      history_truncated,
+      state,
+      notes,
+    };
+  }
+
   // Post data to the room.
   post(data: P): void {
     const name = this.client_api.post(this.room, data, this.packer);
@@ -547,6 +937,14 @@ export class VibiNet<S, P> {
     return this.client_api.ping();
   }
 
+  close(): void {
+    if (this.latest_index_poll_interval_id !== null) {
+      clearInterval(this.latest_index_poll_interval_id);
+      this.latest_index_poll_interval_id = null;
+    }
+    this.client_api.close();
+  }
+
   static gen_name(): string {
     return gen_name_impl();
   }
@@ -555,4 +953,6 @@ export class VibiNet<S, P> {
 export namespace VibiNet {
   export type Packed = PackedType;
   export type Options<S, P> = VibiNetOptions<S, P>;
+  export type DebugDump<S, P> = VibiNetDebugDump<S, P>;
+  export type RecomputeDump<S> = VibiNetRecomputeDump<S>;
 }
