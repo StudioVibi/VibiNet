@@ -50,7 +50,7 @@ Clients replay the same input stream and compute the same game state.
 
 - Official WebSocket endpoint: `wss://net.studiovibi.com`.
 - Official host: `net.studiovibi.com`.
-- Current production machine: `ubuntu@18.230.148.202`.
+- Current production machine: `ubuntu@18.228.157.116`.
 - Remote runbook: `/home/ubuntu/VIBINET_SERVER_NOTES.md`.
 - Remote repo path: `/home/ubuntu/vibinet`.
 - Production auto-sync tracks only GitHub branch `main`.
