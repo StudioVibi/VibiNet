@@ -129,24 +129,24 @@ your state type, `P` your post type.
 
 ### Methods
 
-| Method                     | Returns    | Meaning |
-|----------------------------|------------|---------|
-| `on_sync(cb)`              | `void`     | Runs `cb` once time sync is ready (immediately if already synced). Do not `post` before this. |
-| `post(data: P)`            | `void`     | Sends an input and applies it locally right away (prediction). Throws if called before sync. Queued and flushed if the socket is down. |
-| `compute_render_state()`   | `S`        | State to draw this frame: `smooth(remote_state, local_state)`. |
-| `compute_current_state()`  | `S`        | State at the current server tick (with local prediction). |
-| `compute_state_at(tick)`   | `S`        | State at any tick >= `finalized_tick()` (earlier ticks clamp: their history is folded away). |
-| `server_time()`            | `number`   | Synced server time in ms. Throws before first sync. |
-| `server_tick()`            | `number`   | `time_to_tick(server_time())`. |
-| `time_to_tick(ms)`         | `number`   | `floor(ms * tick_rate / 1000)`. |
-| `ping()`                   | `number`   | Smoothed RTT in ms (`Infinity` before first sample). |
-| `post_count()`             | `number`   | Total posts seen in the room. |
-| `initial_tick()`           | `number \| null` | Tick of the room's first post (`null` if none yet). |
-| `finalized_tick()`         | `number \| null` | Newest tick whose history is final (never rolls back). |
-| `desync()`                 | `Desync \| null` | Non-null if a peer's finalized-state hash disagreed with ours. |
-| `close()`                  | `void`     | Unwatches and closes the connection. |
-| `debug_dump()`             | dump       | Engine + transport introspection. |
-| `VibiNet.name_gen()`       | `string`   | Static. Random 8-char id (useful for room names). |
+| Method                       | Returns          | Meaning                                                                                                                                |
+| ---------------------------- | ------------     | ---------                                                                                                                              |
+| `on_sync(cb)`                | `void`           | Runs `cb` once time sync is ready (immediately if already synced). Do not `post` before this.                                          |
+| `post(data: P)`              | `void`           | Sends an input and applies it locally right away (prediction). Throws if called before sync. Queued and flushed if the socket is down. |
+| `compute_render_state()`     | `S`              | State to draw this frame: `smooth(remote_state, local_state)`.                                                                         |
+| `compute_current_state()`    | `S`              | State at the current server tick (with local prediction).                                                                              |
+| `compute_state_at(tick)`     | `S`              | State at any tick >= `finalized_tick()` (earlier ticks clamp: their history is folded away).                                           |
+| `server_time()`              | `number`         | Synced server time in ms. Throws before first sync.                                                                                    |
+| `server_tick()`              | `number`         | `time_to_tick(server_time())`.                                                                                                         |
+| `time_to_tick(ms)`           | `number`         | `floor(ms * tick_rate / 1000)`.                                                                                                        |
+| `ping()`                     | `number`         | Smoothed RTT in ms (`Infinity` before first sample).                                                                                   |
+| `post_count()`               | `number`         | Total posts seen in the room.                                                                                                          |
+| `initial_tick()`             | `number or null` | Tick of the room's first post (`null` if none yet).                                                                                    |
+| `finalized_tick()`           | `number or null` | Newest tick whose history is final (never rolls back).                                                                                 |
+| `desync()`                   | `Desync or null` | Non-null if a peer's finalized-state hash disagreed with ours.                                                                         |
+| `close()`                    | `void`           | Unwatches and closes the connection.                                                                                                   |
+| `debug_dump()`               | dump             | Engine + transport introspection.                                                                                                      |
+| `VibiNet.name_gen()`         | `string`         | Static. Random 8-char id (useful for room names).                                                                                      |
 
 ### Other exports
 
