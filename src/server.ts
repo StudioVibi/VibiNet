@@ -507,9 +507,9 @@ async function http_handle(req: http.IncomingMessage, res: http.ServerResponse):
       path = "/index.html";
     }
 
-    // Only serve files strictly inside the walkers directory.
-    const walkers_root = resolve_path("walkers");
-    const filesystem_path = resolve_path(`walkers${path}`);
+    // Only serve files strictly inside the demo directory.
+    const walkers_root = resolve_path("demo/walkers");
+    const filesystem_path = resolve_path(`demo/walkers${path}`);
     if (!filesystem_path.startsWith(walkers_root + path_sep)) {
       res.writeHead(404, { "Content-Type": "text/plain" });
       res.end("Not Found");
@@ -543,7 +543,7 @@ async function http_handle(req: http.IncomingMessage, res: http.ServerResponse):
 async function walkers_build(): Promise<void> {
   try {
     const result = Bun.spawnSync({
-      cmd: ["bun", "build", "walkers/index.ts", "--outdir", "walkers/dist", "--target=browser", "--format=esm"],
+      cmd: ["bun", "build", "demo/walkers/index.ts", "--outdir", "demo/walkers/dist", "--target=browser", "--format=esm"],
     });
     if (!result.success) {
       console.error("[BUILD] walkers build failed");

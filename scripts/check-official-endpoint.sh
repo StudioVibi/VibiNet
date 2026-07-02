@@ -2,7 +2,7 @@
 set -euo pipefail
 
 PATTERN='ws://net\.studiovibi\.com:8080'
-TARGETS=("src" "walkers" "README.md")
+TARGETS=("src" "demo" "README.md")
 
 if command -v rg >/dev/null 2>&1; then
   if rg -n "$PATTERN" "${TARGETS[@]}"; then

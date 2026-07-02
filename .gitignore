@@ -27,11 +27,11 @@ pnpm-debug.log*
 
 # Database files
 db/
-walkers/dist/
+demo/walkers/dist/
 
 # PID files
 .server.pid
-walkers/.serve.pid
+demo/walkers/.serve.pid
 
 # Local scratch
 .stuff/

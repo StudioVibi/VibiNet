@@ -5,32 +5,29 @@ A simple multiplayer game demo built with VibiNet. Players control walkers (sing
 ## Project Structure
 
 ```
-walkers/
+demo/walkers/
 ├── index.ts          # Game logic + bootstrap (no JS in HTML)
 ├── index.html        # Game UI with canvas (no inline JS)
-├── dist/             # Compiled JavaScript files (built automatically)
-│   ├── client.js
-│   ├── vibi.js
-│   └── index.js
+├── serve.ts          # Local static server (connects to production)
+├── dist/             # Compiled bundle (built automatically)
 └── README.md         # This file
 ```
 
-The game imports `src/client.ts` from the parent directory, keeping the code DRY and organized.
+The game imports `src/client.ts` from the repo root, keeping the code DRY and organized.
 
 ## How to Play
 
-### 1. Start the WebSocket Server
+Either open the hosted demo at https://net.studiovibi.com, or serve it
+locally (still playing on the production server):
 
-From the root directory:
 ```bash
-bun run server
+bun run demo/walkers/serve.ts   # then open http://localhost:8080
 ```
 
-The unified server builds the browser bundle automatically and serves the game UI.
+To develop against a local game server instead, run `bun run server` from
+the repo root and open http://localhost:8080/?local.
 
-### 2. Open the Game
-
-Open http://localhost:8080 in your browser. You'll be prompted for:
+You'll be prompted for:
 - Room name (auto-generated if left blank)
 - Your nickname (must be a single character)
 

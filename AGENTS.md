@@ -20,7 +20,7 @@ Clients replay the same input stream and compute the same game state.
   Re-exports everything from vibinet.ts.
 - `src/server.ts`: the impure server side (entry point: `bun run
   src/server.ts`). Append-only disk storage (Store/Record sections),
-  watcher/stream bookkeeping, checkpoints, static HTTP for walkers.
+  watcher/stream bookkeeping, checkpoints, static HTTP for the demo.
 - Dependency graph is a strict line: `server.ts -> vibinet.ts <- client.ts`.
 
 ### Naming discipline (bend.ts style)
@@ -70,7 +70,7 @@ Clients replay the same input stream and compute the same game state.
 
 ### Demo app
 
-- `walkers/`: browser demo and tutorial app.
+- `demo/walkers/`: browser demo and tutorial app.
 
 ### Ops automation
 
@@ -82,11 +82,17 @@ Clients replay the same input stream and compute the same game state.
 ## Official Server Context
 
 - Official WebSocket endpoint: `wss://net.studiovibi.com`.
-- Official host: `net.studiovibi.com`.
+- Hosted walkers demo: `https://net.studiovibi.com` (same box, caddy).
 - Current production machine: AWS EC2 sa-east-1 (São Paulo), account
-  483162586707, instance `i-0bb121a73862e8342` (t4g.small, Ubuntu 24.04
-  arm64), Elastic IP `54.207.112.112`. SSH: `ssh vibinet` (alias in
-  Taelin's ssh config, key `~/.ssh/vibinet_aws.pem`).
+  483162586707 (srvictormaia@gmail.com), instance `i-0bb121a73862e8342`
+  (t4g.small, Ubuntu 24.04 arm64), Elastic IP `54.207.112.112`. SSH:
+  `ssh vibinet` (alias in Taelin's ssh config, key
+  `~/.ssh/vibinet_aws.pem`).
+- Cost: ~US$20/mo (instance ~$12 + EBS 30GB + Elastic IP). AWS budget
+  `vibinet-monthly` alerts srvictormaia@gmail.com at 50%/100%/forecast
+  of $30/mo.
+- DNS: `studiovibi.com` zone lives on Namecheap; `net` A record ->
+  54.207.112.112 (updated 2026-07-02).
 - Provisioned by `scripts/provision.sh` (bun + caddy auto-TLS on 443 ->
   127.0.0.1:8080 + systemd units). Re-runnable; see header for the AWS
   commands that created the machine.
@@ -112,7 +118,7 @@ Clients replay the same input stream and compute the same game state.
 
 ## Generated or Runtime Files
 
-- `dist/` and `walkers/dist/` are generated bundles.
+- `dist/` and `demo/walkers/dist/` are generated bundles.
 - `db/*.dat` and `db/*.idx` are persistent room event files.
 - `.tmp/` is local scratch space.
 

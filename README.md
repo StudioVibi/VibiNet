@@ -265,6 +265,6 @@ HOST=127.0.0.1 PORT=8080 bun run src/server.ts # behind a reverse proxy
 
 ## Demo
 
-`walkers/` is a complete commented example (players are letters moving with
+`demo/walkers/` is a complete commented example (players are letters moving with
 WASD): state, posts, packer, smoothing, and browser bootstrap in one file.
 Run `bun run src/server.ts` and open `http://localhost:8080`.
