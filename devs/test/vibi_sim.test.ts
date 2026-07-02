@@ -24,7 +24,7 @@ import {
   TOLERANCE,
 } from "./walkers_game.ts";
 
-const { VibiNet } = await import("../src/client.ts");
+const { VibiNet } = await import("../../vibinet-ts/src/client.ts");
 
 type PlayerSim = {
   id_char: string;

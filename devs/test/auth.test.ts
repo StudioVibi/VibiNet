@@ -30,7 +30,7 @@ import {
   user_new,
   user_nick,
   VibiNet,
-} from "../src/client.ts";
+} from "../../vibinet-ts/src/client.ts";
 import { SimNetwork, create_rng } from "./sim_network.ts";
 
 // User

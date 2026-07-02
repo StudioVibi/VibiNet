@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { packed_encode, packed_decode, Packed } from "../src/vibinet.ts";
+import { packed_encode, packed_decode, Packed } from "../../vibinet-ts/src/vibinet.ts";
 
 test("UInt/Int encode-decode and size", () => {
   const u32: Packed = { $: "UInt", size: 32 };

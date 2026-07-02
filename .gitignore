@@ -2,7 +2,7 @@
 node_modules/
 
 # Build outputs
-dist/
+devs/dist/
 coverage/
 
 # TypeScript incremental build files
@@ -25,8 +25,8 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 
-# Database files
-db/
+# Room data files
+data/
 demo/walkers/dist/
 
 # PID files

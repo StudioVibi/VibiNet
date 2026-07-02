@@ -5,9 +5,22 @@
 VibiNet is a deterministic input-synced netcode library for realtime games.
 Clients replay the same input stream and compute the same game state.
 
+## Repository Layout
+
+- `vibinet-ts/`: the TypeScript implementation — `src/` (the 3 source
+  files), `package.json`, `tsconfig.json`, `bun.lock`, `node_modules/`.
+- `devs/`: dev-specific stuff — `scripts/` (ops), `test/` (bun tests),
+  `dist/` (generated build output, gitignored).
+- `demo/`: example apps (`demo/walkers/`).
+- `data/`: room post storage written by the server (gitignored).
+- `README.md` (product docs), `TUTORIAL.md` (self-contained game-building
+  guide), `AGENTS.md` (this file) stay at the repo root.
+
 ## How VibiNet Works
 
 ### File layout (exactly 3 source files, split by purity + platform)
+
+All paths below are relative to `vibinet-ts/`.
 
 - `src/vibinet.ts`: ALL pure zero-dependency code. One Types section up
   top, then one section per type: Writer/Reader (bit cursors), Packed (bit
@@ -21,8 +34,10 @@ Clients replay the same input stream and compute the same game state.
   that live here only because they depend on @noble/curves + @noble/hashes;
   the server is 100% auth-unaware). Re-exports everything from vibinet.ts.
 - `src/server.ts`: the impure server side (entry point: `bun run
-  src/server.ts`). Append-only disk storage (Store/Record sections),
-  watcher/stream bookkeeping, checkpoints, static HTTP for the demo.
+  vibinet-ts/src/server.ts`). Append-only disk storage (Store/Record
+  sections), watcher/stream bookkeeping, checkpoints, static HTTP for the
+  demo. All disk paths are anchored to the repo root via `import.meta.url`
+  (works from any cwd): posts go to `data/<16hex>.dat/.idx`.
 - Dependency graph is a strict line: `server.ts -> vibinet.ts <- client.ts`.
 
 ### Naming discipline (bend.ts style)
@@ -52,7 +67,7 @@ Clients replay the same input stream and compute the same game state.
   client_time is clamped to it on ingestion (no future-dated posts).
 - Malformed frames are ignored (never crash). Rooms are 64-bit ids (nicks
   like `JohnBear#15FF` in code/UIs; raw 64 bits on the wire; 16 hex digits
-  as db file names), so no name validation is needed.
+  as data file names), so no name validation is needed.
 - Payloads that fail to decode client-side still become posts with
   `data: undefined`: ordered and finalized, never applied. One junk payload
   must not stall a room's frontier.
@@ -82,7 +97,7 @@ Clients replay the same input stream and compute the same game state.
   contiguous delivery, tolerance clamp on both sides).
 - `engine_state_at(tick)` answers any tick >= base; earlier ticks clamp to
   base.
-- `test/engine.test.ts` holds the pure-core property tests (order
+- `devs/test/engine.test.ts` holds the pure-core property tests (order
   invariance, finalization equivalence, prediction, checksums,
   non-mutation).
 - The shell memoizes computed states and invalidates them from the arriving
@@ -92,12 +107,14 @@ Clients replay the same input stream and compute the same game state.
 
 - `demo/walkers/`: browser demo and tutorial app.
 
-### Ops automation
+### Ops automation (`devs/scripts/`)
 
-- `scripts/setup-auto-sync.sh`: installs/updates remote sync units.
-- `scripts/sync-main.sh`: canonical sync job used in production.
-- `scripts/check-official-endpoint.sh`: blocks deprecated official endpoint.
-- `scripts/deploy.sh`: manual deploy fallback.
+- `provision.sh`: provisions/updates a production box end-to-end (bun,
+  caddy, systemd units, auto-sync). Idempotent; re-run it whenever server
+  entry paths or units change.
+- `sync-main.sh`: canonical sync job used in production (runs on the box,
+  pulls main, `bun install` in `vibinet-ts/`, restarts vibinet.service).
+- `check-official-endpoint.sh`: blocks deprecated official endpoint.
 
 ## Official Server Context
 
@@ -113,8 +130,8 @@ Clients replay the same input stream and compute the same game state.
   of $30/mo.
 - DNS: `studiovibi.com` zone lives on Namecheap; `net` A record ->
   54.207.112.112 (updated 2026-07-02).
-- Provisioned by `scripts/provision.sh` (bun + caddy auto-TLS on 443 ->
-  127.0.0.1:8080 + systemd units). Re-runnable; see header for the AWS
+- Provisioned by `devs/scripts/provision.sh` (bun + caddy auto-TLS on 443
+  -> 127.0.0.1:8080 + systemd units). Re-runnable; see header for the AWS
   commands that created the machine.
 - Remote repo path: `/home/ubuntu/vibinet`.
 - Production auto-sync tracks only GitHub branch `main` (45s timer);
@@ -127,28 +144,35 @@ Clients replay the same input stream and compute the same game state.
 ### Must read first
 
 - `README.md` for product usage and self-hosting guidance.
-- `package.json` for scripts and publish behavior.
-- `src/` for library/server behavior.
-- `scripts/` for deployment and sync behavior.
+- `TUTORIAL.md` for the complete how-to-build-a-game guide.
+- `vibinet-ts/package.json` for scripts.
+- `vibinet-ts/src/` for library/server behavior.
+- `devs/scripts/` for deployment and sync behavior.
 
 ### Validation area
 
-- `test/` contains simulation and correctness tests.
+- `devs/test/` contains simulation and correctness tests. Run them from
+  `vibinet-ts/`: `bun test ../devs/test` (or `npm test`).
 - Use tests to validate behavior changes before deploy/publish.
 
 ## Generated or Runtime Files
 
-- `dist/` and `demo/walkers/dist/` are generated bundles.
-- `db/*.dat` and `db/*.idx` are persistent room event files.
+- `devs/dist/` and `demo/walkers/dist/` are generated bundles.
+- `data/*.dat` and `data/*.idx` are persistent room event files.
 - `.tmp/` is local scratch space.
 
 ## Agent Working Rules
 
 1. Keep this `AGENTS.md` updated when architecture or repo structure changes.
 2. Do not hardcode `ws://net.studiovibi.com:8080` as official endpoint.
-3. Before publish/deploy, run:
-   `npm run check:official-endpoint`, `npm run check`, and `bun test`.
-4. Treat GitHub `main` as production source of truth.
-5. Do not make persistent production edits directly on remote working tree.
-6. If server behavior changes, update this file and the remote runbook at
+3. Before deploy, run (from `vibinet-ts/`):
+   `npm run check:official-endpoint`, `npm run check`, and
+   `bun test ../devs/test`.
+4. Keep `TUTORIAL.md` in sync with API/behavior changes.
+5. Treat GitHub `main` as production source of truth.
+6. Do not make persistent production edits directly on remote working tree.
+7. If server behavior changes, update this file and the remote runbook at
    `/home/ubuntu/VIBINET_SERVER_NOTES.md`.
+8. If server entry paths or systemd units change, re-run
+   `devs/scripts/provision.sh vibinet` after pushing (auto-sync only pulls
+   code; it does not rewrite units).

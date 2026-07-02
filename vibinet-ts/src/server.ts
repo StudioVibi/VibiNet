@@ -1,6 +1,6 @@
 // The server side of VibiNet: a WebSocket + static HTTP server (entry
-// point: `bun run src/server.ts`). Everything impure that runs on the
-// server lives here:
+// point: `bun run vibinet-ts/src/server.ts`). Everything impure that runs
+// on the server lives here:
 // - Store: append-only disk storage of posts, one .dat/.idx pair per room
 //          (files are named by the room's 64-bit code as 16 hex digits).
 // - Net:   watcher bookkeeping, contiguous per-client streams, checkpoints.
@@ -19,6 +19,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import http from "http";
 import { readFile as read_file } from "fs/promises";
 import { resolve as resolve_path, sep as path_sep } from "path";
+import { fileURLToPath as file_url_to_path } from "url";
 import {
   appendFileSync as append_file_sync,
   existsSync as exists_sync,
@@ -132,12 +133,15 @@ function record_decode(buf: Uint8Array): StoredPost {
 // Store
 // -----
 
-const DB_DIR = "./db";
+// All paths are anchored to the repo root (this file lives at
+// vibinet-ts/src/server.ts), so the server works from any cwd.
+const ROOT_DIR = resolve_path(file_url_to_path(new URL("../..", import.meta.url)));
+const DATA_DIR = `${ROOT_DIR}/data`;
 const STORES = new Map<string, Store>();
 
 function store_dir(): void {
-  if (!exists_sync(DB_DIR)) {
-    mkdir_sync(DB_DIR);
+  if (!exists_sync(DATA_DIR)) {
+    mkdir_sync(DATA_DIR);
   }
 }
 
@@ -207,8 +211,8 @@ function store_get(room: string): Store {
   if (hex === null) {
     throw new Error(`Invalid room nick: ${JSON.stringify(room)}`);
   }
-  const dat_path = `${DB_DIR}/${hex}.dat`;
-  const idx_path = `${DB_DIR}/${hex}.idx`;
+  const dat_path = `${DATA_DIR}/${hex}.dat`;
+  const idx_path = `${DATA_DIR}/${hex}.idx`;
   let offsets: number[] = [];
   let dat_size = 0;
   if (exists_sync(idx_path)) {
@@ -498,8 +502,8 @@ async function http_handle(req: http.IncomingMessage, res: http.ServerResponse):
     }
 
     // Only serve files strictly inside the demo directory.
-    const walkers_root = resolve_path("demo/walkers");
-    const filesystem_path = resolve_path(`demo/walkers${path}`);
+    const walkers_root = resolve_path(`${ROOT_DIR}/demo/walkers`);
+    const filesystem_path = resolve_path(`${ROOT_DIR}/demo/walkers${path}`);
     if (!filesystem_path.startsWith(walkers_root + path_sep)) {
       res.writeHead(404, { "Content-Type": "text/plain" });
       res.end("Not Found");
@@ -533,7 +537,7 @@ async function http_handle(req: http.IncomingMessage, res: http.ServerResponse):
 async function walkers_build(): Promise<void> {
   try {
     const result = Bun.spawnSync({
-      cmd: ["bun", "build", "demo/walkers/index.ts", "--outdir", "demo/walkers/dist", "--target=browser", "--format=esm"],
+      cmd: ["bun", "build", `${ROOT_DIR}/demo/walkers/index.ts`, "--outdir", `${ROOT_DIR}/demo/walkers/dist`, "--target=browser", "--format=esm"],
     });
     if (!result.success) {
       console.error("[BUILD] walkers build failed");

@@ -7,8 +7,8 @@
 //
 // This file is the entire pure core: no IO, no timers, no clocks, no
 // mutation of inputs. The shells own all side effects and call into here:
-// - src/client.ts: WebSocket transport + the stateful VibiNet.game class.
-// - src/server.ts: WebSocket server + append-only disk storage.
+// - client.ts: WebSocket transport + the stateful VibiNet.game class.
+// - server.ts: WebSocket server + append-only disk storage.
 //
 // ## Time model
 //
@@ -1007,7 +1007,7 @@ export function nick_link(text: string): string {
   return text.replace("#", ".");
 }
 
-// The code as 16 hex digits (db file names; null if invalid).
+// The code as 16 hex digits (data file names; null if invalid).
 export function nick_hex(text: string): string | null {
   const code = nick_read(text);
   if (code === null) {

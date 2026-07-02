@@ -11,5 +11,5 @@
     "allowImportingTsExtensions": true,
     "noEmit": true
   },
-  "include": ["*.ts", "src/**/*.ts", "walkers/**/*.ts"]
+  "include": ["src/**/*.ts", "../demo/**/*.ts"]
 }

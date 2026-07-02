@@ -10,12 +10,16 @@ prediction; late posts trigger an automatic rollback + replay. Proven-final
 history is folded into a single base state, so memory and rollback cost stay
 bounded, and clients cross-check state hashes to detect divergence.
 
-The library is split by purity: `src/vibinet.ts` is the entire pure core
-(bit packer, wire codec, replay engine) — plain data in, plain data out, no
-IO. `src/client.ts` is the client shell (WebSocket transport + the stateful
-`VibiNet.game` class) plus the optional client-side identity layer
-(Ethereum-style users, per-post auth, display names — the server knows
-nothing about any of it), and `src/server.ts` is the server entry point.
+The library is split by purity: `vibinet-ts/src/vibinet.ts` is the entire
+pure core (bit packer, wire codec, replay engine) — plain data in, plain
+data out, no IO. `vibinet-ts/src/client.ts` is the client shell (WebSocket
+transport + the stateful `VibiNet.game` class) plus the optional
+client-side identity layer (Ethereum-style users, per-post auth, display
+names — the server knows nothing about any of it), and
+`vibinet-ts/src/server.ts` is the server entry point.
+
+New here? Read `TUTORIAL.md` — a self-contained, step-by-step guide to
+building an online game with VibiNet.
 
 Requirements: your logic must be deterministic. Same inputs, same order, same
 result. No `Math.random()`, no `Date.now()`, no reads outside the state, and
@@ -26,17 +30,21 @@ immutable (return new objects, never mutate).
 ## Install
 
 ```bash
-npm install vibinet
+git clone https://github.com/StudioVibi/VibiNet vibinet
 ```
 
 ```ts
-import { VibiNet } from "vibinet";
+import { VibiNet } from "./vibinet/vibinet-ts/src/client.ts";
 ```
+
+The TypeScript implementation lives in `vibinet-ts/` (a bun-first package:
+import the source directly, or `npm run build` there to emit a browser
+bundle + `.d.ts` at `devs/dist/`).
 
 ## Quick Start
 
 ```ts
-import { VibiNet } from "vibinet";
+import { VibiNet } from "vibinet"; // or from "./vibinet/vibinet-ts/src/client.ts"
 
 // 1. State: plain data, one snapshot of the world per tick.
 type State = { [pid: string]: { x: number; y: number; dx: number } };
@@ -346,24 +354,24 @@ disk, and streams them to watchers in contiguous index order. It never
 decodes payloads and never runs game logic.
 
 ```bash
-bun run src/server.ts                          # 0.0.0.0:8080, also serves walkers demo
-HOST=127.0.0.1 PORT=8080 bun run src/server.ts # behind a reverse proxy
+bun run vibinet-ts/src/server.ts                          # 0.0.0.0:8080, also serves walkers demo
+HOST=127.0.0.1 PORT=8080 bun run vibinet-ts/src/server.ts # behind a reverse proxy
 ```
 
-- Posts persist in `db/<code>.dat` + `db/<code>.idx` (append-only), where
-  `<code>` is the room's 64-bit id as 16 hex digits. Delete both files to
-  reset a room.
+- Posts persist in `data/<code>.dat` + `data/<code>.idx` at the repo root
+  (append-only), where `<code>` is the room's 64-bit id as 16 hex digits.
+  Delete both files to reset a room.
 - `CHECKPOINT_MS` (default 1000) sets the checkpoint broadcast period; lower
   values shrink the clients' pending window.
 - Client and server must run the same vibinet version: the wire protocol is
   not stable across minor versions (0.4.0 changed it: rooms are 64-bit).
 - Browser pages served over HTTPS must use `wss://` (the client auto-upgrades
   and warns).
-- Deployment/auto-sync helpers live in `scripts/` (see `AGENTS.md`).
+- Deployment/auto-sync helpers live in `devs/scripts/` (see `AGENTS.md`).
 
 ## Demo
 
 `demo/walkers/` is a complete commented example (players are letters moving with
 WASD): state, posts, packer, smoothing, and browser bootstrap in one file.
-Run `bun run src/server.ts` and open `http://localhost:8080` (share a room
-with `?room=SomeRoom.15FF`).
+Run `bun run vibinet-ts/src/server.ts` and open `http://localhost:8080`
+(share a room with `?room=SomeRoom.15FF`).

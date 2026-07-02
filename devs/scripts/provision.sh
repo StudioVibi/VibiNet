@@ -5,8 +5,8 @@ set -euo pipefail
 # bun + caddy (auto-TLS) + vibinet.service + GitHub auto-sync units.
 #
 # Usage:
-#   scripts/provision.sh <ssh-target>            # e.g. ubuntu@54.207.112.112
-#   SSH_OPTS="-i ~/.ssh/key.pem" scripts/provision.sh <ssh-target>
+#   devs/scripts/provision.sh <ssh-target>       # e.g. ubuntu@54.207.112.112
+#   SSH_OPTS="-i ~/.ssh/key.pem" devs/scripts/provision.sh <ssh-target>
 #
 # Env:
 #   DOMAIN   (default net.studiovibi.com)  domain caddy serves TLS for
@@ -78,7 +78,9 @@ cd "$REPO_DIR"
 git remote set-url origin "$REPO_URL"
 git fetch origin "$BRANCH"
 git checkout -f -B "$BRANCH" "origin/$BRANCH"
+cd "$REPO_DIR/vibinet-ts"
 "$BUN_BIN" install --frozen-lockfile || "$BUN_BIN" install
+cd "$REPO_DIR"
 
 echo "[5/6] vibinet.service"
 sudo tee /etc/systemd/system/vibinet.service >/dev/null <<UNIT
@@ -93,7 +95,7 @@ Group=$USER
 WorkingDirectory=$REPO_DIR
 Environment=HOST=127.0.0.1
 Environment=PORT=8080
-ExecStart=$BUN_BIN run src/server.ts
+ExecStart=$BUN_BIN run vibinet-ts/src/server.ts
 Restart=always
 RestartSec=2
 
@@ -105,7 +107,7 @@ sudo systemctl enable --now vibinet.service
 sudo systemctl restart vibinet.service
 
 echo "[6/6] auto-sync units (deploy = push to $BRANCH)"
-chmod +x "$REPO_DIR/scripts/sync-main.sh"
+chmod +x "$REPO_DIR/devs/scripts/sync-main.sh"
 sudo tee /etc/systemd/system/vibinet-sync.service >/dev/null <<UNIT
 [Unit]
 Description=Sync VibiNet from GitHub $BRANCH
@@ -121,7 +123,7 @@ Environment=REPO_URL=$REPO_URL
 Environment=BRANCH=$BRANCH
 Environment=BUN_BIN=$BUN_BIN
 Environment=SERVICE=vibinet.service
-ExecStart=/usr/bin/env bash $REPO_DIR/scripts/sync-main.sh
+ExecStart=/usr/bin/env bash $REPO_DIR/devs/scripts/sync-main.sh
 UNIT
 
 sudo tee /etc/systemd/system/vibinet-sync.timer >/dev/null <<TIMER

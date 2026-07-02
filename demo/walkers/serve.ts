@@ -4,7 +4,7 @@
 //   bun run demo/walkers/serve.ts     # http://localhost:8080
 //
 // To develop against a local game server instead, run
-// `bun run src/server.ts` and open http://localhost:8080/?local.
+// `bun run vibinet-ts/src/server.ts` and open http://localhost:8080/?local.
 
 declare const Bun: any;
 

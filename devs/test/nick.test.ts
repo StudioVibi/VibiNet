@@ -2,7 +2,7 @@
 // plus 4 hex digits. Leading '_' are zero digits (stripped when printing).
 
 import { test, expect } from "bun:test";
-import { nick_read, nick_show, nick_norm, nick_link, nick_hex, packed_encode, packed_decode, Packed } from "../src/vibinet.ts";
+import { nick_read, nick_show, nick_norm, nick_link, nick_hex, packed_encode, packed_decode, Packed } from "../../vibinet-ts/src/vibinet.ts";
 
 test("nick roundtrip on random codes", () => {
   let seed = 0x9e3779b97f4a7c15n;

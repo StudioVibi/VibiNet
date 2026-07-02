@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
-import { client_new } from "../src/client.ts";
-import { message_decode, message_encode, Message } from "../src/vibinet.ts";
+import { client_new } from "../../vibinet-ts/src/client.ts";
+import { message_decode, message_encode, Message } from "../../vibinet-ts/src/vibinet.ts";
 
 type Listener = (event: any) => void;
 

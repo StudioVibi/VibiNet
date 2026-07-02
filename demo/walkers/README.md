@@ -13,7 +13,7 @@ demo/walkers/
 └── README.md         # This file
 ```
 
-The game imports `src/client.ts` from the repo root, keeping the code DRY and organized.
+The game imports `vibinet-ts/src/client.ts` from the repo root, keeping the code DRY and organized.
 
 ## How to Play
 
@@ -24,8 +24,9 @@ locally (still playing on the production server):
 bun run demo/walkers/serve.ts   # then open http://localhost:8080
 ```
 
-To develop against a local game server instead, run `bun run server` from
-the repo root and open http://localhost:8080/?local.
+To develop against a local game server instead, run `bun run
+vibinet-ts/src/server.ts` from the repo root and open
+http://localhost:8080/?local.
 
 You'll be prompted for:
 - Room name (auto-generated if left blank)

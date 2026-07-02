@@ -1,4 +1,4 @@
-import { Packed } from "../src/vibinet.ts";
+import { Packed } from "../../vibinet-ts/src/vibinet.ts";
 
 export type Player = {
   x: number;

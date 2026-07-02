@@ -14,7 +14,7 @@ import {
   engine_check,
   post_tick,
   state_hash,
-} from "../src/vibinet.ts";
+} from "../../vibinet-ts/src/vibinet.ts";
 import {
   Post,
   State,

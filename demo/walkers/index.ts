@@ -1,5 +1,5 @@
-import { VibiNet } from "../../src/client.ts";
-import pkg from "../../package.json" assert { type: "json" };
+import { VibiNet } from "../../vibinet-ts/src/client.ts";
+import pkg from "../../vibinet-ts/package.json" assert { type: "json" };
 
 // Walkers: each player is a single letter that moves with WASD.
 // This file mirrors the README tutorial steps, but with full code.
@@ -185,7 +185,7 @@ const smooth = (remote_state: State, local_state: State): State => {
 
 // The demo talks to the official production server by default, even when
 // served from localhost. Pass ?local to develop against a locally running
-// `bun run src/server.ts` instead.
+// `bun run vibinet-ts/src/server.ts` instead.
 const host = window.location.hostname;
 const is_local = host === "localhost" || host === "127.0.0.1";
 const wants_local = new URLSearchParams(window.location.search).has("local");
