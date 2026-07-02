@@ -1,12 +1,19 @@
 # VibiNet
 
-VibiNet lets you build real‑time online games by writing **offline game logic**.
-You define the state and how it changes; VibiNet handles networking, ordering,
-time sync, and replay so every client computes the same state.
+Deterministic input-synced netcode for real-time browser games.
 
-If you can write the offline version of your game, VibiNet can make it online.
+You write your game as two pure functions (`on_tick`, `on_post`). VibiNet
+syncs **inputs**, not state: the server timestamps, orders, stores, and
+broadcasts posts; every client replays the same post stream through the same
+pure functions and computes the same state. Local inputs apply instantly via
+prediction; late posts trigger an automatic rollback + replay from cached
+snapshots.
 
-## Quick Start (Recommended)
+Requirements: your logic must be deterministic. Same inputs, same order, same
+result. No `Math.random()`, no `Date.now()`, no reads outside the state. Both
+functions must treat state as immutable (return new objects, never mutate).
+
+## Install
 
 ```bash
 npm install vibinet
@@ -16,438 +23,222 @@ npm install vibinet
 import { VibiNet } from "vibinet";
 ```
 
-Create your game instance directly from the installed package:
+## Quick Start
 
 ```ts
+import { VibiNet } from "vibinet";
+
+// 1. State: plain data, one snapshot of the world per tick.
+type State = { [pid: string]: { x: number; y: number; dx: number } };
+const initial: State = {};
+
+// 2. Posts: player inputs. The ONLY thing sent over the network.
+type Post =
+  | { $: "spawn"; pid: number; x: number; y: number }
+  | { $: "move";  pid: number; dx: number };
+
+// 3. Pure logic.
+function on_tick(s: State): State {
+  const out: State = {};
+  for (const [pid, p] of Object.entries(s)) {
+    out[pid] = { ...p, x: p.x + p.dx };
+  }
+  return out;
+}
+
+function on_post(post: Post, s: State): State {
+  switch (post.$) {
+    case "spawn": return { ...s, [post.pid]: { x: post.x, y: post.y, dx: 0 } };
+    case "move":  return { ...s, [post.pid]: { ...s[post.pid], dx: post.dx } };
+  }
+}
+
+// 4. Wire schema for posts (see "Packed Types" below).
+const packer: VibiNet.Packed = {
+  $: "Union",
+  variants: {
+    spawn: { $: "Struct", fields: {
+      pid: { $: "UInt", size: 8 },
+      x:   { $: "Int",  size: 32 },
+      y:   { $: "Int",  size: 32 },
+    }},
+    move: { $: "Struct", fields: {
+      pid: { $: "UInt", size: 8 },
+      dx:  { $: "Int",  size: 8 },
+    }},
+  },
+};
+
+// 5. Create the game object.
 const game = new VibiNet.game<State, Post>({
+  server: "ws://localhost:8080", // omit for the official server
   room: "my-room",
   initial,
   on_tick,
   on_post,
   packer,
-  tick_rate,
-  tolerance,
-  smooth, // optional
+  tick_rate: 24,  // ticks per second
+  tolerance: 300, // ms a late input may land in the past
 });
-```
 
-If you omit `server`, VibiNet uses the official server at
-`wss://net.studiovibi.com` (host: `net.studiovibi.com`).
-
-For production usage, prefer omitting `server` unless you are explicitly
-self-hosting.
-
-## How It Works
-
-Most multiplayer engines sync state: the server runs the game, clients receive
-snapshots. This works, but it's complex and bandwidth‑heavy.
-
-VibiNet does something different: it syncs **inputs**.
-
-You write your game as if it were offline — a pure function from state to state.
-VibiNet runs that same function on every client. The server's only job is to
-collect inputs, timestamp them, and broadcast them in order. Every client
-replays the same inputs from the same starting point, so every client computes
-the same state.
-
-This means:
-- The server never runs your game logic.
-- Late joiners replay the input history to catch up.
-- Bandwidth is tiny (just inputs, not world state).
-
-The tradeoff is that your logic must be **deterministic**. Same inputs, same
-order, same result — every time. No `Math.random()`, no floating‑point drift,
-no reading from outside the game state.
-
-Under the hood (short):
-- **Time sync + official ticks.** Clients continuously ping the server to align
-  clocks (nonce-matched requests over a monotonic local clock). Each post has
-  client and server time; VibiNet assigns a deterministic tick using
-  `tolerance` so all clients agree. The server clamps `client_time` to its own
-  monotone clock, so posts can never be scheduled in the future.
-- **Local prediction + rollback netcode.** Local posts apply immediately; when a
-  late post arrives, VibiNet rewinds to that tick and replays forward.
-- **Snapshot caching.** Recent state snapshots are cached in a bounded window
-  so rollback and replay stay fast.
-- **Gapless ingest + safe pruning.** The stream is applied in contiguous index
-  order, and cache pruning is clamped by a completeness frontier so no history
-  event is silently discarded.
-- **Compact binary.** Posts are encoded with your `packer` and stored/sent as
-  raw bytes.
-
-Below are the concepts that make this work.
-
-### Rooms
-
-A **room** is an append‑only stream of posts. Think of it as a game universe.
-The first post starts the room and anchors its initial time.
-
-Rooms are multi‑purpose: a match, a lobby, a shard, or the entire world.
-
-### Posts
-
-A **post** is a player input — spawn, key down, key up, etc. Posts are the
-**only** things sent over the network. You never send state. Every client
-replays the same post stream to compute the same state.
-
-### Ticks, Time, and Tolerance
-
-Time advances in fixed **ticks**. Each tick, VibiNet runs `on_tick` (your
-function that advances the world), then applies all posts assigned to that tick
-in order.
-
-Each post has a client time and a server time. VibiNet clamps the official time
-so inputs can land slightly in the past:
-
-`official_time = max(client_time, server_time - tolerance)`
-
-This lets players with moderate latency still have their inputs feel responsive.
-
-### Smoothing (Optional)
-
-VibiNet can optionally blend a stable past state with a locally predicted
-present state so your own inputs feel instant. The Walkers example shows a
-simple pattern for this below.
-
-## Example: Walkers
-
-Let's build a tiny multiplayer game called **Walkers**. Each player is a single
-letter that moves with WASD. That's it — simple enough to fit in one file, but
-enough to show how VibiNet works.
-
-The full, commented version of this tutorial lives in `walkers/index.ts`.
-
-### 1) Define State
-
-State is a complete snapshot of the world at one tick. It should be plain data
-that can be copied and replayed deterministically.
-
-For Walkers, each player has a position (`x`, `y`) and four booleans tracking
-which keys are currently held:
-
-```ts
-type Player = {
-  x: number;
-  y: number;
-  w: number;
-  a: number;
-  s: number;
-  d: number;
-};
-
-type State = { [char: string]: Player };
-
-const initial: State = {};
-```
-
-### 2) Define Posts
-
-Posts are user inputs. We keep the TypeScript type ergonomic, but we'll pack it
-compactly on the wire.
-
-Walkers needs three kinds of posts:
-- `spawn`: a player joins at a position.
-- `down`: a player presses a key.
-- `up`: a player releases a key.
-
-Walkers uses a `pid` field to identify players. That's just a game choice — you
-can use any id scheme you want.
-
-```ts
-type Key =
-  | { $: "w" }
-  | { $: "a" }
-  | { $: "s" }
-  | { $: "d" };
-
-type Post =
-  | { $: "spawn"; pid: number; x: number; y: number }
-  | { $: "down"; pid: number; key: Key }
-  | { $: "up"; pid: number; key: Key };
-```
-
-### 3) Write The Two Pure Functions
-
-`on_tick(state)` advances the world by one tick.
-`on_post(post, state)` applies a single input.
-
-Both must be **pure** and **deterministic**. They must not mutate the input
-state — always return a new object. The engine assumes immutability; mutating
-will desync clients.
-
-```ts
-function on_tick(state: State): State {
-  // move each player based on which keys are held
-}
-
-function on_post(post: Post, state: State): State {
-  // handle spawn, key down, key up
-}
-```
-
-### 4) Pack Posts Efficiently
-
-VibiNet stores and sends posts in compact binary form. You describe the shape
-once with a `Packed` schema.
-
-For Walkers:
-- `pid` is a single ASCII code → `UInt(8)`.
-- Keys are 4 variants → a 2‑bit union.
-
-```ts
-const key_packer: VibiNet.Packed = {
-  $: "Union",
-  variants: {
-    w: { $: "Struct", fields: {} },
-    a: { $: "Struct", fields: {} },
-    s: { $: "Struct", fields: {} },
-    d: { $: "Struct", fields: {} },
-  },
-};
-
-const packer: VibiNet.Packed = {
-  $: "Union",
-  variants: {
-    spawn: {
-      $: "Struct",
-      fields: {
-        pid: { $: "UInt", size: 8 },
-        x: { $: "Int", size: 32 },
-        y: { $: "Int", size: 32 },
-      },
-    },
-    down: {
-      $: "Struct",
-      fields: {
-        pid: { $: "UInt", size: 8 },
-        key: key_packer,
-      },
-    },
-    up: {
-      $: "Struct",
-      fields: {
-        pid: { $: "UInt", size: 8 },
-        key: key_packer,
-      },
-    },
-  },
-};
-```
-
-### 5) Choose Timing
-
-`tick_rate` is how many ticks per second. `tolerance` is the time window (in ms)
-for late posts to still be applied in the past.
-
-```ts
-const tick_rate = 24;
-const tolerance = 300;
-```
-
-### 6) (Optional) Smooth Local Prediction
-
-By default, VibiNet renders a **stable past** so all clients agree. If you want
-your own inputs to feel instant, blend in your local predicted player.
-
-VibiNet computes two states:
-- **local_state**: present tick, including your local inputs.
-- **remote_state**: a past tick that is stable across clients.
-
-The past tick is chosen as:
-
-`remote_tick = current_tick - max(tolerance_ticks, half_rtt_ticks + 1)`
-
-Walkers uses a single character as the player id. We keep our player from the
-local state and everyone else from the remote state:
-
-```ts
-const my_char = "A"; // however you pick the local player
-
-const smooth = (remote_state: State, local_state: State): State => {
-  const me = local_state[my_char];
-  if (!me) return remote_state;
-  return { ...remote_state, [my_char]: me };
-};
-```
-
-### 7) Create The VibiNet Game Object
-
-Now you can construct the game. This object owns the network connection and
-state replay.
-
-```ts
-const room = "walkers";
-
-const game = new VibiNet.game<State, Post>({
-  room,
-  initial,
-  on_tick,
-  on_post,
-  packer,
-  tick_rate,
-  tolerance,
-  smooth, // optional
-});
-```
-
-If you omit `server`, it defaults to `wss://net.studiovibi.com`
-(official host: `net.studiovibi.com`). You can point it at any WebSocket
-server that speaks the VibiNet protocol.
-If you don't want smoothing, omit the `smooth` field.
-
-Every player in the same room must use **identical** logic and config. If they
-don't, they'll compute different states and desync.
-
-### 8) Use The Game Object
-
-VibiNet connects automatically. `game.on_sync` fires once time sync is ready.
-Only post after that.
-
-```ts
-const pid = "A".charCodeAt(0);
-
+// 6. Post inputs only after time sync; render every frame.
 game.on_sync(() => {
-  game.post({ $: "spawn", pid, x: 200, y: 200 });
+  game.post({ $: "spawn", pid: 65, x: 200, y: 200 });
 });
 
-// In your render loop:
-const state = game.compute_render_state();
+function frame() {
+  const state = game.compute_render_state();
+  // ...draw state...
+  requestAnimationFrame(frame);
+}
+frame();
 ```
 
-If a websocket drops (idle tab, network change, sleep/wake), the client
-reconnects automatically and re-subscribes watched rooms from its last seen
-index, so only missing posts are re-sent and state converges again after
-reconnect. Posts created while offline are queued and flushed on reconnect.
+Every client in the same room must use identical `initial`, `on_tick`,
+`on_post`, `packer`, `tick_rate`, and `tolerance`, or they will desync.
 
-Rendering is up to you — VibiNet only computes state.
+## API
 
-## Self‑Hosting
+### `new VibiNet.game<S, P>(options)`
 
-The VibiNet server is game‑agnostic. It:
-- assigns monotone server time and orders posts,
-- stores raw post payloads (it does not decode them),
-- broadcasts posts to watchers.
+`VibiNet.game` is the class itself (`new VibiNet(...)` also works). `S` is
+your state type, `P` your post type.
 
-Room names must match `[A-Za-z0-9_-]{1,64}` (they map to storage filenames).
+| Option            | Type                    | Default            | Meaning |
+|-------------------|-------------------------|--------------------|---------|
+| `room`            | `string`                | required           | Room to join. Must match `[A-Za-z0-9_-]{1,64}`. |
+| `initial`         | `S`                     | required           | State before the first post. |
+| `on_tick`         | `(s: S) => S`           | required           | Advances the world by one tick. Pure. |
+| `on_post`         | `(p: P, s: S) => S`     | required           | Applies one input. Pure. |
+| `packer`          | `VibiNet.Packed`        | required           | Wire schema for `P`. |
+| `tick_rate`       | `number`                | required           | Ticks per second. |
+| `tolerance`       | `number`                | required           | Max ms an input may apply in the past (see Time Model). |
+| `server`          | `string`                | official server    | WebSocket URL. `http(s)://` is auto-upgraded to `ws(s)://`. |
+| `smooth`          | `(remote: S, local: S) => S` | `(r, l) => r` | Blends stable past + predicted present (see below). |
+| `cache`           | `boolean`               | `true`             | Snapshot caching. Off = full replay per call (debug only). |
+| `snapshot_stride` | `number`                | `8`                | Ticks between snapshots. |
+| `snapshot_count`  | `number`                | `256`              | Snapshots kept. Rollback window = `stride * count` ticks. |
+| `client`          | `ClientApi<P>`          | real WebSocket     | Injectable transport, for tests/simulation. |
 
-It never runs your game logic.
+### Methods
 
-To run your own server:
+| Method                     | Returns    | Meaning |
+|----------------------------|------------|---------|
+| `on_sync(cb)`              | `void`     | Runs `cb` once time sync is ready (immediately if already synced). Do not `post` before this. |
+| `post(data: P)`            | `void`     | Sends an input and applies it locally right away (prediction). Throws if called before sync. Queued and flushed if the socket is down. |
+| `compute_render_state()`   | `S`        | State to draw this frame: `smooth(remote_state, local_state)`. |
+| `compute_current_state()`  | `S`        | State at the current server tick (with local prediction). |
+| `compute_state_at(tick)`   | `S`        | State at an arbitrary tick (clamped to known-complete history). |
+| `server_time()`            | `number`   | Synced server time in ms. Throws before first sync. |
+| `server_tick()`            | `number`   | `time_to_tick(server_time())`. |
+| `time_to_tick(ms)`         | `number`   | `floor(ms * tick_rate / 1000)`. |
+| `ping()`                   | `number`   | Smoothed RTT in ms (`Infinity` before first sample). |
+| `post_count()`             | `number`   | Total posts seen in the room. |
+| `initial_time()` / `initial_tick()` | `number \| null` | Time/tick of the room's first post (`null` if none yet). |
+| `close()`                  | `void`     | Unwatches and closes the connection. |
+| `debug_dump()`             | dump       | Full engine introspection (posts, timeline, snapshots, client). |
+| `debug_recompute(tick?)`   | dump       | Drops the cache and replays from scratch. Debug only. |
+| `VibiNet.gen_name()`       | `string`   | Static. Random 8-char id (useful for room names). |
 
-```bash
-bun run src/server.ts
-```
-
-This starts a server on `0.0.0.0:8080` by default and also serves the Walkers
-demo.
-
-For production, run it behind a reverse proxy on `80/443` and keep the VibiNet
-process on localhost only:
-
-```bash
-HOST=127.0.0.1 PORT=8080 bun run src/server.ts
-```
-
-Then proxy `wss://your-domain` -> `ws://127.0.0.1:8080`.
-
-To connect a client to your self‑hosted server:
+### Other exports
 
 ```ts
-const game = new VibiNet.game({ server: "wss://<your-domain>", ... });
+import { VibiNet, create_client, gen_name, OFFICIAL_SERVER_URL } from "vibinet";
 ```
 
-### Auto‑Sync From GitHub (main)
+- `create_client(server?)` — the raw WebSocket transport (`ClientApi`), only
+  needed to build custom transports or tests.
+- `OFFICIAL_SERVER_URL` — `wss://net.studiovibi.com`.
+- Types: `VibiNet.Packed`, `VibiNet.Options<S, P>`, `VibiNet.DebugDump<S, P>`,
+  `VibiNet.RecomputeDump<S>`.
 
-If you want the server to stay in sync with your GitHub `main` branch
-automatically, use the setup script below once from your local machine:
+## Time Model
 
-```bash
-REMOTE_HOST=ubuntu@<server-ip> \
-REMOTE_DIR=/home/ubuntu/vibinet \
-REPO_URL=https://github.com/<owner>/<repo> \
-BRANCH=main \
-scripts/setup-auto-sync.sh
+A **room** is an append-only stream of posts. Its first post anchors tick 0's
+epoch. Each post gets a `client_time` (sender's synced clock) and a
+`server_time` (assigned at ingestion, monotone). The tick a post lands on is
+the same for every client:
+
+```
+official_time = max(client_time, server_time - tolerance)   // server also
+official_tick = floor(official_time * tick_rate / 1000)     // clamps
+                                                            // client_time <= server_time
 ```
 
-This installs `vibinet-sync.timer` on the server. The timer periodically:
-- fetches `origin/main`,
-- hard-syncs the working tree to that commit,
-- runs `bun install`,
-- restarts `vibinet.service`.
-- runs `scripts/sync-main.sh` from the repo (single source of truth).
+So an input applies at the moment the player pressed it, as long as it reaches
+the server within `tolerance` ms — clients that already passed that tick roll
+back and replay. Larger `tolerance` = more responsive under lag, but deeper
+rollbacks and higher remote render delay.
 
-Important:
-- The server mirrors `main` exactly. Uncommitted local changes are never deployed.
-- Always test the public endpoint (HTTPS page + WSS connection) after each push.
-- Never hardcode `ws://` for non-localhost browser clients.
+### Rendering and `smooth`
 
-Posts are stored in `db/<room>.dat` and `db/<room>.idx` (append‑only). Delete
-those files to reset a room.
+`compute_render_state()` computes two states and blends them:
+
+- `local_state`: current tick, including your predicted inputs.
+- `remote_state`: a past tick that is stable (no rollbacks expected):
+  `remote_tick = curr_tick - max(tolerance_ticks, half_rtt_ticks + 1)`.
+
+Default `smooth` returns `remote_state` (everything delayed but stable). The
+usual pattern is: take yourself from `local_state`, everyone else from
+`remote_state`:
+
+```ts
+const smooth = (remote: State, local: State): State =>
+  local[me] ? { ...remote, [me]: local[me] } : remote;
+```
+
+### Rollback window
+
+Snapshots cover `snapshot_stride * snapshot_count` ticks (default 2048 ticks
+= ~85 s at 24 tps). Posts older than the window are pruned only after the
+server proves no earlier post can still arrive, so history is never silently
+dropped. Late joiners replay the whole room to catch up. On reconnect, the
+client resumes from its last seen post index.
 
 ## Packed Types
 
-Packed types describe how to encode your posts. This is a usage reference for
-building schemas.
+Schemas are values of type `VibiNet.Packed`. Encoding is a compact bitstream:
+no field names, no padding, LSB-first.
 
-### Struct
+| Schema | Value | Wire format |
+|--------|-------|-------------|
+| `{ $: "Struct", fields: {a: T, ...} }` | object | each field in key order |
+| `{ $: "Tuple", fields: [T, ...] }` | array | each element in order |
+| `{ $: "Vector", size: N, type: T }` | array of length N | N elements, no length |
+| `{ $: "List", type: T }` | array | 1-bit cons tag per item + item, 0-bit end |
+| `{ $: "Map", key: K, value: V }` | `Map` or object (decodes to `Map`) | list of key/value pairs |
+| `{ $: "Union", variants: {tag: T, ...} }` | `{ $: "tag", ... }` | `ceil(log2(n))`-bit tag + payload |
+| `{ $: "String" }` | string | UTF-8 bytes as a List |
+| `{ $: "UInt", size: N }` | number (`bigint` if N > 53) | N bits |
+| `{ $: "Int", size: N }` | number (`bigint` if N > 53) | N bits, two's complement |
+| `{ $: "Nat" }` | number | unary (N+1 bits) — small values only |
 
-`{ $: "Struct", fields: { ... } }`
+Union notes: tag ids are assigned by *sorting variant names* — renaming a
+variant changes the wire format. For `Struct` variants the object itself is
+the payload; for any other variant type use `{ $: "tag", value: payload }`.
 
-A fixed set of named fields. Your value is a plain object with those keys.
+## Server
 
-### Tuple
+The server is game-agnostic: it assigns monotone timestamps, appends posts to
+disk, and streams them to watchers in contiguous index order. It never
+decodes payloads and never runs game logic.
 
-`{ $: "Tuple", fields: [ ... ] }`
+```bash
+bun run src/server.ts                          # 0.0.0.0:8080, also serves walkers demo
+HOST=127.0.0.1 PORT=8080 bun run src/server.ts # behind a reverse proxy
+```
 
-A fixed sequence of types. Your value is an Array with matching length.
+- Posts persist in `db/<room>.dat` + `db/<room>.idx` (append-only). Delete
+  both files to reset a room.
+- Room names are restricted to `[A-Za-z0-9_-]{1,64}`.
+- Client and server must run the same vibinet version: the wire protocol is
+  not stable across minor versions (0.2.0 changed it).
+- Browser pages served over HTTPS must use `wss://` (the client auto-upgrades
+  and warns).
+- Deployment/auto-sync helpers live in `scripts/` (see `AGENTS.md`).
 
-### Vector
+## Demo
 
-`{ $: "Vector", size: N, type: T }`
-
-Exactly `N` items of the same type. Your value is an Array of length `N`.
-
-### List
-
-`{ $: "List", type: T }`
-
-A variable‑length sequence. Your value is a plain Array.
-
-### Map
-
-`{ $: "Map", key: K, value: V }`
-
-Key/value pairs. Your value can be a `Map` or a plain object.
-
-### Union
-
-`{ $: "Union", variants: { ... } }`
-
-Tagged variants. Your value must be an object with a string `$` tag.
-For Struct variants, the object itself is the payload.
-For non‑Struct variants, use `{ $: "tag", value: payload }`.
-
-### String
-
-`{ $: "String" }`
-
-A UTF‑8 string.
-
-### Nat
-
-`{ $: "Nat" }`
-
-A small non‑negative integer (unary encoded — best for small values).
-
-### UInt
-
-`{ $: "UInt", size: N }`
-
-An unsigned integer in exactly `N` bits. Use `bigint` for `N > 53`.
-
-### Int
-
-`{ $: "Int", size: N }`
-
-A signed integer in exactly `N` bits (two's complement). Use `bigint` for
-`N > 53`.
+`walkers/` is a complete commented example (players are letters moving with
+WASD): state, posts, packer, smoothing, and browser bootstrap in one file.
+Run `bun run src/server.ts` and open `http://localhost:8080`.
