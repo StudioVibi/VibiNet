@@ -83,10 +83,18 @@ Clients replay the same input stream and compute the same game state.
 
 - Official WebSocket endpoint: `wss://net.studiovibi.com`.
 - Official host: `net.studiovibi.com`.
-- Current production machine: `ubuntu@18.228.157.116`.
-- Remote runbook: `/home/ubuntu/VIBINET_SERVER_NOTES.md`.
+- Current production machine: AWS EC2 sa-east-1 (São Paulo), account
+  483162586707, instance `i-0bb121a73862e8342` (t4g.small, Ubuntu 24.04
+  arm64), Elastic IP `54.207.112.112`. SSH: `ssh vibinet` (alias in
+  Taelin's ssh config, key `~/.ssh/vibinet_aws.pem`).
+- Provisioned by `scripts/provision.sh` (bun + caddy auto-TLS on 443 ->
+  127.0.0.1:8080 + systemd units). Re-runnable; see header for the AWS
+  commands that created the machine.
 - Remote repo path: `/home/ubuntu/vibinet`.
-- Production auto-sync tracks only GitHub branch `main`.
+- Production auto-sync tracks only GitHub branch `main` (45s timer);
+  deploy = push to main.
+- Previous machine (18.230.148.202 / 18.228.157.116) is dead; DNS was
+  repointed 2026-07-02.
 
 ## Important Repo Areas
 
