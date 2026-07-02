@@ -79,6 +79,17 @@ function decode_sent(messages: Uint8Array[]): Message[] {
   return messages.map((bytes) => decode_message(bytes));
 }
 
+function last_time_nonce(socket: FakeWebSocket): number {
+  const msgs = decode_sent(socket.sent);
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    const msg = msgs[i];
+    if (msg.$ === "get_time") {
+      return msg.nonce;
+    }
+  }
+  throw new Error("no get_time sent");
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -117,6 +128,68 @@ function with_fake_websocket(run: () => Promise<void> | void): Promise<void> {
   return done();
 }
 
+test("client ignores stale info_time replies (nonce mismatch)", async () => {
+  await with_fake_websocket(async () => {
+    const client = create_client<number>("wss://example.test");
+
+    const socket1 = FakeWebSocket.instances[0];
+    expect(socket1).toBeDefined();
+    socket1.open();
+
+    const nonce = last_time_nonce(socket1);
+
+    // A stale reply (wrong nonce) must not establish sync or poison the clock.
+    socket1.message({ $: "info_time", nonce: nonce + 1, time: 123456789 });
+    expect(() => client.server_time()).toThrow();
+
+    // The matching reply syncs normally.
+    socket1.message({ $: "info_time", nonce, time: 123456789 });
+    expect(() => client.server_time()).not.toThrow();
+
+    client.close();
+  });
+});
+
+test("client re-watches from its cursor after reconnect", async () => {
+  await with_fake_websocket(async () => {
+    const packer = { $: "UInt", size: 8 } as any;
+    const client = create_client<number>("wss://example.test");
+
+    const socket1 = FakeWebSocket.instances[0];
+    expect(socket1).toBeDefined();
+    socket1.open();
+
+    client.watch("room-d", packer, () => {});
+    const first_sent = decode_sent(socket1.sent);
+    const first_watch = first_sent.find((msg) => msg.$ === "watch");
+    expect(first_watch && first_watch.$ === "watch" && first_watch.from).toBe(0);
+
+    // Deliver posts 0..2; client cursor should advance to 3.
+    for (let i = 0; i < 3; i++) {
+      socket1.message({
+        $: "info_post",
+        room: "room-d",
+        index: i,
+        server_time: 1000 + i,
+        client_time: 1000 + i,
+        name: `p${i}`,
+        payload: new Uint8Array([i]),
+      });
+    }
+
+    socket1.fail(1006);
+    await wait_until(() => FakeWebSocket.instances.length >= 2);
+    const socket2 = FakeWebSocket.instances[1];
+    socket2.open();
+
+    const second_sent = decode_sent(socket2.sent);
+    const second_watch = second_sent.find((msg) => msg.$ === "watch");
+    expect(second_watch && second_watch.$ === "watch" && second_watch.from).toBe(3);
+
+    client.close();
+  });
+});
+
 test("client reconnects and re-watches tracked rooms", async () => {
   await with_fake_websocket(async () => {
     const packer = { $: "UInt", size: 8 } as any;
@@ -153,7 +226,7 @@ test("client queues posts during disconnect and flushes after reconnect", async 
     expect(socket1).toBeDefined();
     socket1.open();
 
-    socket1.message({ $: "info_time", time: Date.now() });
+    socket1.message({ $: "info_time", nonce: last_time_nonce(socket1), time: Date.now() });
     client.post("room-b", 7, packer);
 
     const first_sent = decode_sent(socket1.sent);
@@ -183,7 +256,7 @@ test("client flushes all queued posts after reconnect", async () => {
     const socket1 = FakeWebSocket.instances[0];
     expect(socket1).toBeDefined();
     socket1.open();
-    socket1.message({ $: "info_time", time: Date.now() });
+    socket1.message({ $: "info_time", nonce: last_time_nonce(socket1), time: Date.now() });
     socket1.fail(1006);
 
     expect(() => client.post("room-c", 1, packer)).not.toThrow();

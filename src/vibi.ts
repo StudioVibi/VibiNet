@@ -193,6 +193,9 @@ export class VibiNet<S, P> {
   cache_drop_guard_hits: number;
   latest_index_poll_interval_id: ReturnType<typeof setInterval> | null;
   max_remote_index:    number;
+  timeline_version:    number;
+  state_memo:          Map<number, { version: number; state: S }>;
+  last_prune_tick:     number | null;
 
   // Compute the authoritative time a post takes effect.
   private official_time(post: Post<P>): number {
@@ -267,9 +270,14 @@ export class VibiNet<S, P> {
     }
     const safe_prune_tick = this.safe_prune_tick();
     if (safe_prune_tick !== null && prune_tick > safe_prune_tick) {
-      this.cache_drop_guard_hits += 1;
       prune_tick = safe_prune_tick;
     }
+    // Skip redundant scans: pruning is monotone, so if we already pruned up
+    // to this tick there is nothing new to remove.
+    if (this.last_prune_tick !== null && prune_tick <= this.last_prune_tick) {
+      return;
+    }
+    this.last_prune_tick = prune_tick;
     for (const tick of this.timeline.keys()) {
       if (tick < prune_tick) {
         this.timeline.delete(tick);
@@ -334,7 +342,11 @@ export class VibiNet<S, P> {
         break;
       }
       this.max_contiguous_remote_index = next_index;
-      this.advance_no_pending_posts_before_ms(this.official_time(post));
+      // Any not-yet-seen post has a higher index, hence a server_time >= this
+      // post's server_time, hence official_time >= server_time - tolerance.
+      // NOTE: official_time(post) itself is NOT a safe frontier: client_time
+      // is unclamped on the future side, so it is not monotone in index.
+      this.advance_no_pending_posts_before_ms(post.server_time - this.tolerance);
     }
   }
 
@@ -443,6 +455,12 @@ export class VibiNet<S, P> {
       tick < this.snapshot_start_tick;
     if (before_window) {
       this.cache_drop_guard_hits += 1;
+      if (this.last_prune_tick !== null && tick < this.last_prune_tick) {
+        console.error(
+          `[VIBI] post arrived below the prune frontier (tick=${tick}, ` +
+          `pruned<${this.last_prune_tick}); state may be irrecoverably wrong`
+        );
+      }
       this.snapshots.clear();
       this.snapshot_start_tick = null;
     }
@@ -454,6 +472,7 @@ export class VibiNet<S, P> {
     this.advance_contiguous_remote_frontier();
     this.insert_remote_post(post, tick);
     this.invalidate_from_tick(tick);
+    this.timeline_version += 1;
   }
 
   // Add a local predicted post (applied after remote posts for the same tick).
@@ -475,6 +494,7 @@ export class VibiNet<S, P> {
     this.local_posts.set(name, post);
     this.get_bucket(tick).local.push(post);
     this.invalidate_from_tick(tick);
+    this.timeline_version += 1;
   }
 
   // Remove a local predicted post once the authoritative echo arrives.
@@ -503,6 +523,7 @@ export class VibiNet<S, P> {
     }
 
     this.invalidate_from_tick(tick);
+    this.timeline_version += 1;
   }
 
   // Apply on_tick plus any posts for a single tick.
@@ -606,6 +627,9 @@ export class VibiNet<S, P> {
     this.cache_drop_guard_hits = 0;
     this.latest_index_poll_interval_id = null;
     this.max_remote_index     = -1;
+    this.timeline_version     = 0;
+    this.state_memo           = new Map();
+    this.last_prune_tick      = null;
 
     if (this.client_api.on_latest_post_index) {
       this.client_api.on_latest_post_index((info) => {
@@ -625,8 +649,8 @@ export class VibiNet<S, P> {
         this.add_remote_post(post);
       };
 
-      // Load all existing posts before enabling live stream.
-      this.client_api.load(this.room, 0, this.packer, on_info_post);
+      // watch streams the full history (from the client's cursor) and then
+      // stays live, so no separate "load" step is needed.
       this.client_api.watch(this.room, this.packer, on_info_post);
       this.request_latest_post_index();
       if (this.latest_index_poll_interval_id !== null) {
@@ -717,8 +741,23 @@ export class VibiNet<S, P> {
       return this.init;
     }
 
+    // Memoize by (tick, timeline_version): renders repeat the same ticks
+    // several frames in a row, and the result is deterministic until the
+    // timeline changes.
+    const memo = this.state_memo.get(at_tick);
+    if (memo && memo.version === this.timeline_version) {
+      return memo.state;
+    }
+    const remember = (state: S): S => {
+      if (this.state_memo.size >= 16) {
+        this.state_memo.clear();
+      }
+      this.state_memo.set(at_tick, { version: this.timeline_version, state });
+      return state;
+    };
+
     if (!this.cache_enabled) {
-      return this.compute_state_at_uncached(initial_tick, at_tick);
+      return remember(this.compute_state_at_uncached(initial_tick, at_tick));
     }
 
     this.ensure_snapshots(at_tick, initial_tick);
@@ -739,7 +778,7 @@ export class VibiNet<S, P> {
     const index = Math.min(snap_index, max_index);
     const snap_tick = start_tick + index * stride;
     const base_state = this.snapshots.get(snap_tick) ?? this.init;
-    return this.advance_state(base_state, snap_tick, at_tick);
+    return remember(this.advance_state(base_state, snap_tick, at_tick));
   }
 
   debug_dump(): VibiNetDebugDump<S, P> {

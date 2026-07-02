@@ -16,10 +16,14 @@ Clients replay the same input stream and compute the same game state.
 
 ### Protocol and encoding
 
-- `src/packer.ts`: bit-level schema serializer/deserializer.
+- `src/packer.ts`: bit-level schema serializer/deserializer (bounds-checked decode).
 - `src/protocol.ts`: wire message schema and adapters.
-- `src/binary.ts`: binary helpers used by storage/protocol internals.
+- `src/binary.ts`: binary helpers used by storage internals.
 - Protocol includes latest-index checkpoint messages used by replay safety.
+- Time sync messages carry a nonce; only the reply to the latest request is
+  accepted (stale replies would poison the clock offset).
+- `watch` carries a `from` index; there is no separate `load` message. The
+  client tracks a per-room cursor and re-watches from it on reconnect.
 
 ### Server side
 
@@ -27,13 +31,20 @@ Clients replay the same input stream and compute the same game state.
 - `src/storage.ts`: append-only room persistence.
 - `src/server_url.ts`: official endpoint constant and URL normalization.
 - Server streams room posts with per-connection ordered contiguous cursors.
+- Server time is monotone (post server_time never decreases in index) and
+  client_time is clamped to it on ingestion (no future-dated posts).
+- Malformed frames are ignored (never crash); room names are validated
+  against `[A-Za-z0-9_-]{1,64}` before touching storage.
 
 ### Replay safety model
 
 - Client tracks `no_pending_posts_before_ms` in `src/vibi.ts`.
+- The contiguous frontier advances by `server_time - tolerance` (NOT
+  `official_time`, which is not monotone in index).
 - `compute_state_at` is clamped so pruning never crosses unknown history.
 - If a post arrives before the cache window, cache is invalidated loudly;
   posts are not silently dropped.
+- `compute_state_at` results are memoized per (tick, timeline_version).
 
 ### Demo app
 

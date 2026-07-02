@@ -5,12 +5,6 @@ import { OFFICIAL_SERVER_URL, normalize_ws_url } from "./server_url.ts";
 export type ClientApi<P> = {
   on_sync: (callback: () => void) => void;
   watch: (room: string, packer: Packed, handler?: (post: any) => void) => void;
-  load: (
-    room: string,
-    from: number,
-    packer: Packed,
-    handler?: (post: any) => void
-  ) => void;
   get_latest_post_index?: (room: string) => void;
   on_latest_post_index?: (
     callback: (info: { room: string; latest_index: number; server_time: number }) => void
@@ -26,14 +20,18 @@ type TimeSync = {
   clock_offset: number;
   lowest_ping: number;
   request_sent_at: number;
+  request_nonce: number;
   last_ping: number;
+  avg_ping: number;
 };
 
 type MessageHandler = (message: any) => void;
 type RoomWatcher = { handler?: MessageHandler; packer: Packed };
 
+// Monotonic local clock. Wall clocks (Date.now) can step backwards or jump
+// on NTP adjustments and sleep/wake, which would poison the clock offset.
 function now(): number {
-  return Math.floor(Date.now());
+  return Math.floor(performance.now());
 }
 
 function default_ws_url(): string {
@@ -41,7 +39,8 @@ function default_ws_url(): string {
 }
 
 export function gen_name(): string {
-  const alphabet = "_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-";
+  // Exactly 64 chars so `% 64` maps uniformly.
+  const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
   const bytes = new Uint8Array(8);
   const can_crypto = typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function";
 
@@ -66,11 +65,16 @@ export function create_client<P>(server?: string): ClientApi<P> {
     clock_offset: Infinity,
     lowest_ping: Infinity,
     request_sent_at: 0,
+    request_nonce: 0,
     last_ping: Infinity,
+    avg_ping: Infinity,
   };
 
   const room_watchers = new Map<string, RoomWatcher>();
   const watched_rooms = new Set<string>();
+  // Next contiguous index expected per room; on reconnect we re-watch from
+  // here so the server only re-sends what we haven't seen.
+  const room_cursors = new Map<string, number>();
   const latest_post_index_listeners: Array<
     (info: { room: string; latest_index: number; server_time: number }) => void
   > = [];
@@ -137,8 +141,17 @@ export function create_client<P>(server?: string): ClientApi<P> {
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       return;
     }
+    time_sync.request_nonce = (time_sync.request_nonce + 1) >>> 0;
     time_sync.request_sent_at = now();
-    ws.send(encode_message({ $: "get_time" }));
+    ws.send(encode_message({ $: "get_time", nonce: time_sync.request_nonce }));
+  }
+
+  function watch_message(room: string): Uint8Array {
+    return encode_message({
+      $: "watch",
+      room,
+      from: room_cursors.get(room) ?? 0,
+    });
   }
 
   function try_send(buf: Uint8Array): boolean {
@@ -210,10 +223,13 @@ export function create_client<P>(server?: string): ClientApi<P> {
       }
       reconnect_attempt = 0;
       console.log("[WS] Connected");
+      // The network path may have changed; let fresh samples re-lock the
+      // clock offset instead of trusting a stale lowest-ping estimate.
+      time_sync.lowest_ping = Infinity;
       send_time_request_if_open();
       clear_heartbeat();
       for (const room of watched_rooms.values()) {
-        socket.send(encode_message({ $: "watch", room }));
+        socket.send(watch_message(room));
       }
       flush_pending_posts_if_open();
       heartbeat_id = setInterval(send_time_request_if_open, 2000);
@@ -228,10 +244,19 @@ export function create_client<P>(server?: string): ClientApi<P> {
 
       switch (msg.$) {
         case "info_time": {
+          // Only accept the reply to the most recent request. Without this,
+          // a late reply matched against a newer request computes a bogus
+          // tiny ping and permanently locks a wrong clock offset.
+          if (msg.nonce !== time_sync.request_nonce) {
+            break;
+          }
           const t = now();
           const ping = t - time_sync.request_sent_at;
 
           time_sync.last_ping = ping;
+          time_sync.avg_ping = isFinite(time_sync.avg_ping)
+            ? (0.8 * time_sync.avg_ping) + (0.2 * ping)
+            : ping;
 
           if (ping < time_sync.lowest_ping) {
             const local_avg = Math.floor((time_sync.request_sent_at + t) / 2);
@@ -250,6 +275,10 @@ export function create_client<P>(server?: string): ClientApi<P> {
         }
 
         case "info_post": {
+          const cursor = room_cursors.get(msg.room) ?? 0;
+          if (msg.index >= cursor) {
+            room_cursors.set(msg.room, msg.index + 1);
+          }
           const watcher = room_watchers.get(msg.room);
           if (watcher && watcher.handler) {
             const data = decode(watcher.packer, msg.payload);
@@ -309,11 +338,7 @@ export function create_client<P>(server?: string): ClientApi<P> {
     watch: (room, packer, handler) => {
       register_handler(room, packer, handler);
       watched_rooms.add(room);
-      send_or_reconnect(encode_message({ $: "watch", room }));
-    },
-    load: (room, from, packer, handler) => {
-      register_handler(room, packer, handler);
-      send_or_reconnect(encode_message({ $: "load", room, from }));
+      send_or_reconnect(watch_message(room));
     },
     get_latest_post_index: (room) => {
       send_or_reconnect(encode_message({ $: "get_latest_post_index", room }));
@@ -334,7 +359,9 @@ export function create_client<P>(server?: string): ClientApi<P> {
       return name;
     },
     server_time,
-    ping: () => time_sync.last_ping,
+    // Smoothed RTT: raw samples jitter, and the render lag derived from
+    // ping would jump around frame to frame otherwise.
+    ping: () => time_sync.avg_ping,
     close: () => {
       manual_close = true;
       clear_reconnect_timer();
@@ -361,6 +388,7 @@ export function create_client<P>(server?: string): ClientApi<P> {
       reconnect_scheduled: reconnect_timer_id !== null,
       pending_post_count: pending_posts.length,
       watched_rooms: Array.from(watched_rooms.values()),
+      room_cursors: Object.fromEntries(room_cursors.entries()),
       room_watchers: Array.from(room_watchers.keys()),
       room_watcher_count: room_watchers.size,
       latest_post_index_listener_count: latest_post_index_listeners.length,
@@ -369,7 +397,9 @@ export function create_client<P>(server?: string): ClientApi<P> {
         clock_offset: time_sync.clock_offset,
         lowest_ping: time_sync.lowest_ping,
         request_sent_at: time_sync.request_sent_at,
+        request_nonce: time_sync.request_nonce,
         last_ping: time_sync.last_ping,
+        avg_ping: time_sync.avg_ping,
       },
     }),
   };

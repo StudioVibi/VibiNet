@@ -1,8 +1,9 @@
 import { WebSocketServer, WebSocket } from "ws";
 import http from "http";
 import { readFile as read_file } from "fs/promises";
+import { resolve as resolve_path, sep as path_sep } from "path";
 import { decode_message, encode_message } from "./protocol.ts";
-import { append_post, ensure_db_dir, get_post, get_post_count } from "./storage.ts";
+import { append_post, ensure_db_dir, get_post_count, is_valid_room, read_posts } from "./storage.ts";
 
 declare const Bun: any;
 
@@ -28,11 +29,17 @@ await build_walkers();
 const server = http.createServer(async (req, res) => {
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host}`);
-    let path = url.pathname;
+    let path = decodeURIComponent(url.pathname);
     if (path === "/") path = "/index.html";
 
-    let filesystem_path: string;
-    filesystem_path = path.startsWith("/dist/") ? `walkers${path}` : `walkers${path}`;
+    // Only serve files strictly inside the walkers directory.
+    const walkers_root = resolve_path("walkers");
+    const filesystem_path = resolve_path(`walkers${path}`);
+    if (!filesystem_path.startsWith(walkers_root + path_sep)) {
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("Not Found");
+      return;
+    }
 
     let ct = "application/octet-stream";
     if (path.endsWith(".html")) {
@@ -54,12 +61,18 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-const wss = new WebSocketServer({ server });
+// Posts are tiny inputs; cap frames to keep memory bounded.
+const wss = new WebSocketServer({ server, maxPayload: 64 * 1024 });
 const port = Number(process.env.PORT ?? 8080);
 const host = process.env.HOST ?? "0.0.0.0";
 
+// Monotone server clock. Post server_times MUST be non-decreasing in index
+// (the client replay-safety frontier depends on it), so never let a wall
+// clock step backwards leak into assigned times.
+let last_now = 0;
 function now(): number {
-  return Math.floor(Date.now());
+  last_now = Math.max(last_now, Math.floor(Date.now()));
+  return last_now;
 }
 
 type RoomStreamState = {
@@ -90,10 +103,6 @@ const ws_heartbeat_interval_id = setInterval(() => {
     ws.ping();
   }
 }, 30000);
-
-setInterval(() => {
-  console.log("Server time:", now());
-}, 1000);
 
 ensure_db_dir();
 
@@ -155,36 +164,7 @@ function add_watcher(ws: WebSocket, room: string): void {
   set.add(ws);
 }
 
-function send_info_post(
-  ws: WebSocket,
-  room: string,
-  index: number,
-  post: {
-    server_time: number;
-    client_time: number;
-    name: string;
-    payload: Uint8Array;
-  }
-): void {
-  ws.send(
-    encode_message({
-      $: "info_post",
-      room,
-      index,
-      server_time: post.server_time,
-      client_time: post.client_time,
-      name: post.name,
-      payload: post.payload,
-    })
-  );
-}
-
-function drain_room(
-  ws: WebSocket,
-  room: string,
-  state: RoomStreamState,
-  max_index_exclusive?: number
-): void {
+function drain_room(ws: WebSocket, room: string, state: RoomStreamState): void {
   if (state.drain_active) {
     return;
   }
@@ -197,18 +177,29 @@ function drain_room(
     for (;;) {
       const next = state.next_to_send;
       const count = get_post_count(room);
-      const limit = max_index_exclusive === undefined
-        ? count
-        : Math.min(count, max_index_exclusive);
-      if (next >= limit) {
+      if (next >= count) {
         break;
       }
-      const post = get_post(room, next);
-      if (!post) {
+      // Read in batches with a single file descriptor.
+      const batch = read_posts(room, next, 256);
+      if (batch.length === 0) {
         break;
       }
-      send_info_post(ws, room, next, post);
-      state.next_to_send = next + 1;
+      for (let i = 0; i < batch.length; i++) {
+        const post = batch[i];
+        ws.send(
+          encode_message({
+            $: "info_post",
+            room,
+            index: next + i,
+            server_time: post.server_time,
+            client_time: post.client_time,
+            name: post.name,
+            payload: post.payload,
+          })
+        );
+      }
+      state.next_to_send = next + batch.length;
     }
   } finally {
     state.drain_active = false;
@@ -222,14 +213,28 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("message", (buffer) => {
-    const message = decode_message(as_uint8_array(buffer));
+    // Never let a malformed or malicious frame crash the process.
+    let message;
+    try {
+      message = decode_message(as_uint8_array(buffer));
+    } catch {
+      return;
+    }
+    if ("room" in message && !is_valid_room(message.room)) {
+      return;
+    }
     switch (message.$) {
       case "get_time":
-        ws.send(encode_message({ $: "info_time", time: now() }));
+        ws.send(encode_message({ $: "info_time", nonce: message.nonce, time: now() }));
         break;
       case "post": {
         const server_time = now();
-        const client_time = Math.floor(message.time);
+        // Clamp client_time to the past: official_time already clamps the
+        // past side with `tolerance`; clamping the future side here keeps
+        // posts from being scheduled at arbitrary future ticks (cheat and
+        // frontier-corruption vector). Stored once, so replay stays
+        // deterministic for every client.
+        const client_time = Math.min(Math.floor(message.time), server_time);
         const room = message.room;
         const name = message.name;
         const payload = message.payload;
@@ -250,23 +255,15 @@ wss.on("connection", (ws) => {
         }
         break;
       }
-      case "load": {
+      case "watch": {
         const room = message.room;
-        const from = Math.max(0, message.from || 0);
+        const from = Math.max(0, Math.floor(message.from || 0));
         const stream = get_room_stream_state(ws, room);
         // Never rewind already-sent indices; preserve contiguous delivery.
         stream.next_to_send = Math.max(stream.next_to_send, from);
-        const one_shot_limit = stream.watching ? undefined : get_post_count(room);
-        drain_room(ws, room, stream, one_shot_limit);
-        break;
-      }
-      case "watch": {
-        const room = message.room;
-        const stream = get_room_stream_state(ws, room);
         stream.watching = true;
         add_watcher(ws, room);
         drain_room(ws, room, stream);
-        console.log("Watching:", { room });
         break;
       }
       case "unwatch": {
@@ -274,7 +271,6 @@ wss.on("connection", (ws) => {
         const stream = get_room_stream_state(ws, room);
         stream.watching = false;
         remove_watcher(ws, room);
-        console.log("Unwatching:", { room });
         break;
       }
       case "get_latest_post_index": {

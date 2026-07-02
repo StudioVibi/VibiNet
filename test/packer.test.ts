@@ -350,3 +350,15 @@ test("GamePost union sizes (string fields + u16 positions)", () => {
   expect(encode(game_post_t, down).length).toBe(2);
   expect(encode(game_post_t, up).length).toBe(2);
 });
+
+test("decode throws on truncated buffer instead of reading zeros", () => {
+  const u32: Packed = { $: "UInt", size: 32 };
+  const buf = encode(u32, 0xdeadbeef);
+  expect(() => decode(u32, buf.subarray(0, 2))).toThrow(RangeError);
+
+  const s: Packed = { $: "String" };
+  const s_buf = encode(s, "hello");
+  expect(() => decode(s, s_buf.subarray(0, 2))).toThrow(RangeError);
+
+  expect(() => decode(u32, new Uint8Array(0))).toThrow(RangeError);
+});

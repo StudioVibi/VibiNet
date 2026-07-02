@@ -95,7 +95,7 @@ export class SimServer<P> {
     this.streams = new Map();
   }
 
-  watch(room: string, client: SimClient<P>): void {
+  watch(room: string, client: SimClient<P>, from = 0): void {
     let set = this.watchers.get(room);
     if (!set) {
       set = new Set();
@@ -103,17 +103,9 @@ export class SimServer<P> {
     }
     set.add(client);
     const stream = this.get_stream_state(room, client);
+    stream.next_to_send = Math.max(stream.next_to_send, Math.max(0, from));
     stream.watching = true;
     this.drain(room, client, stream);
-  }
-
-  load(room: string, from: number, client: SimClient<P>): void {
-    const stream = this.get_stream_state(room, client);
-    stream.next_to_send = Math.max(stream.next_to_send, Math.max(0, from));
-    const one_shot_limit = stream.watching
-      ? undefined
-      : this.get_posts(room).length;
-    this.drain(room, client, stream, one_shot_limit);
   }
 
   receive_post(
@@ -165,13 +157,10 @@ export class SimServer<P> {
   private drain(
     room: string,
     client: SimClient<P>,
-    stream: StreamState,
-    max_index_exclusive?: number
+    stream: StreamState
   ): void {
     const posts = this.get_posts(room);
-    const limit = max_index_exclusive === undefined
-      ? posts.length
-      : Math.min(posts.length, max_index_exclusive);
+    const limit = posts.length;
     while (stream.next_to_send < limit) {
       client.schedule_delivery(posts[stream.next_to_send]);
       stream.next_to_send += 1;
@@ -250,10 +239,6 @@ export class SimClient<P> {
       this.handlers.set(room, handler);
     }
     this.network.server.watch(room, this);
-  }
-
-  load(room: string, from: number, _packed: any): void {
-    this.network.server.load(room, from, this);
   }
 
   get_latest_post_index(room: string): void {

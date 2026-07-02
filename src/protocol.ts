@@ -2,12 +2,11 @@
 //
 // Network protocol for VibiNet, encoded via packer.ts.
 // Each WebSocket frame is a packed Union with one of these variants:
-// - get_time: no fields
-// - info_time: { time }
+// - get_time: { nonce }
+// - info_time: { nonce, time }
 // - post: { room, time, name, payload }
 // - info_post: { room, index, server_time, client_time, name, payload }
-// - load: { room, from }
-// - watch: { room }
+// - watch: { room, from }
 // - unwatch: { room }
 // - get_latest_post_index: { room }
 // - info_latest_post_index: { room, latest_index, server_time }
@@ -19,8 +18,8 @@
 import { decode, encode, Packed } from "./packer.ts";
 
 type WireMessage =
-  | { $: "get_time" }
-  | { $: "info_time"; time: number }
+  | { $: "get_time"; nonce: number }
+  | { $: "info_time"; nonce: number; time: number }
   | { $: "post"; room: string; time: number; name: string; payload: number[] }
   | {
       $: "info_post";
@@ -31,8 +30,7 @@ type WireMessage =
       name: string;
       payload: number[];
     }
-  | { $: "load"; room: string; from: number }
-  | { $: "watch"; room: string }
+  | { $: "watch"; room: string; from: number }
   | { $: "unwatch"; room: string }
   | { $: "get_latest_post_index"; room: string }
   | {
@@ -43,8 +41,8 @@ type WireMessage =
     };
 
 export type Message =
-  | { $: "get_time" }
-  | { $: "info_time"; time: number }
+  | { $: "get_time"; nonce: number }
+  | { $: "info_time"; nonce: number; time: number }
   | { $: "post"; room: string; time: number; name: string; payload: Uint8Array }
   | {
       $: "info_post";
@@ -55,8 +53,7 @@ export type Message =
       name: string;
       payload: Uint8Array;
     }
-  | { $: "load"; room: string; from: number }
-  | { $: "watch"; room: string }
+  | { $: "watch"; room: string; from: number }
   | { $: "unwatch"; room: string }
   | { $: "get_latest_post_index"; room: string }
   | {
@@ -72,10 +69,16 @@ const BYTE_LIST_PACKED: Packed = { $: "List", type: { $: "UInt", size: 8 } };
 const MESSAGE_PACKED: Packed = {
   $: "Union",
   variants: {
-    get_time: { $: "Struct", fields: {} },
+    get_time: {
+      $: "Struct",
+      fields: {
+        nonce: { $: "UInt", size: 32 },
+      },
+    },
     info_time: {
       $: "Struct",
       fields: {
+        nonce: { $: "UInt", size: 32 },
         time: { $: "UInt", size: TIME_BITS },
       },
     },
@@ -99,17 +102,11 @@ const MESSAGE_PACKED: Packed = {
         payload: BYTE_LIST_PACKED,
       },
     },
-    load: {
-      $: "Struct",
-      fields: {
-        room: { $: "String" },
-        from: { $: "UInt", size: 32 },
-      },
-    },
     watch: {
       $: "Struct",
       fields: {
         room: { $: "String" },
+        from: { $: "UInt", size: 32 },
       },
     },
     unwatch: {

@@ -36,10 +36,19 @@ type RoomStore = {
   idx_path: string;
   offsets: number[];
   dat_size: number;
+  read_fd: number | null;
 };
 
 const stores = new Map<string, RoomStore>();
 const db_dir = "./db";
+
+// Room names become filenames; restrict them to a safe charset so they can
+// never traverse paths (e.g. "../../etc/passwd").
+const ROOM_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
+
+export function is_valid_room(room: string): boolean {
+  return ROOM_NAME_RE.test(room);
+}
 
 export function ensure_db_dir(): void {
   if (!exists_sync(db_dir)) {
@@ -124,6 +133,9 @@ function rebuild_index(dat_path: string, idx_path: string): { offsets: number[];
 function get_room_store(room: string): RoomStore {
   let store = stores.get(room);
   if (store) return store;
+  if (!is_valid_room(room)) {
+    throw new Error(`Invalid room name: ${JSON.stringify(room)}`);
+  }
   const dat_path = `${db_dir}/${room}.dat`;
   const idx_path = `${db_dir}/${room}.idx`;
   let offsets: number[] = [];
@@ -136,21 +148,30 @@ function get_room_store(room: string): RoomStore {
     offsets = rebuilt.offsets;
     dat_size = rebuilt.dat_size;
   }
-  store = { dat_path, idx_path, offsets, dat_size };
+  store = { dat_path, idx_path, offsets, dat_size, read_fd: null };
   stores.set(room, store);
   return store;
+}
+
+function get_read_fd(store: RoomStore): number {
+  if (store.read_fd === null) {
+    store.read_fd = open_sync(store.dat_path, "r");
+  }
+  return store.read_fd;
 }
 
 export function append_post(room: string, post: StoredPost): number {
   ensure_db_dir();
   const store = get_room_store(room);
   const record = encode_record(post);
-  const len_buf = Buffer.allocUnsafe(4);
-  new DataView(len_buf.buffer, len_buf.byteOffset, len_buf.byteLength).setUint32(0, record.length, true);
+  // Single write for [len][record]: fewer syscalls and no torn record if the
+  // process dies between two appends.
+  const rec_buf = Buffer.allocUnsafe(4 + record.length);
+  new DataView(rec_buf.buffer, rec_buf.byteOffset, rec_buf.byteLength).setUint32(0, record.length, true);
+  rec_buf.set(record, 4);
 
   const offset = store.dat_size;
-  append_file_sync(store.dat_path, len_buf);
-  append_file_sync(store.dat_path, record);
+  append_file_sync(store.dat_path, rec_buf);
 
   const idx_buf = Buffer.allocUnsafe(8);
   new DataView(idx_buf.buffer, idx_buf.byteOffset, idx_buf.byteLength).setBigUint64(0, BigInt(offset), true);
@@ -166,58 +187,24 @@ export function get_post_count(room: string): number {
   return store.offsets.length;
 }
 
-export function get_post(room: string, index: number): StoredPost | null {
+// Read up to `max` posts starting at index `from`, reusing one fd per room.
+export function read_posts(room: string, from: number, max: number): StoredPost[] {
   const store = get_room_store(room);
-  if (index < 0 || index >= store.offsets.length) {
-    return null;
+  const start = Math.max(0, from);
+  const end = Math.min(store.offsets.length, start + Math.max(0, max));
+  if (start >= end) {
+    return [];
   }
-  if (!exists_sync(store.dat_path)) {
-    return null;
-  }
-
-  const offset = store.offsets[index];
-  const fd = open_sync(store.dat_path, "r");
+  const fd = get_read_fd(store);
   const len_buf = Buffer.allocUnsafe(4);
-  try {
+  const out: StoredPost[] = [];
+  for (let index = start; index < end; index++) {
+    const offset = store.offsets[index];
     read_sync(fd, len_buf, 0, 4, offset);
-    const len = new DataView(
-      len_buf.buffer,
-      len_buf.byteOffset,
-      len_buf.byteLength
-    ).getUint32(0, true);
+    const len = new DataView(len_buf.buffer, len_buf.byteOffset, len_buf.byteLength).getUint32(0, true);
     const rec_buf = Buffer.allocUnsafe(len);
     read_sync(fd, rec_buf, 0, len, offset + 4);
-    return decode_record(rec_buf);
-  } finally {
-    close_sync(fd);
+    out.push(decode_record(rec_buf));
   }
-}
-
-export function for_each_post(
-  room: string,
-  from: number,
-  fn: (index: number, post: StoredPost) => void
-): void {
-  const store = get_room_store(room);
-  if (from >= store.offsets.length) {
-    return;
-  }
-  if (!exists_sync(store.dat_path)) {
-    return;
-  }
-  const fd = open_sync(store.dat_path, "r");
-  const len_buf = Buffer.allocUnsafe(4);
-  try {
-    for (let index = from; index < store.offsets.length; index++) {
-      const offset = store.offsets[index];
-      read_sync(fd, len_buf, 0, 4, offset);
-      const len = new DataView(len_buf.buffer, len_buf.byteOffset, len_buf.byteLength).getUint32(0, true);
-      const rec_buf = Buffer.allocUnsafe(len);
-      read_sync(fd, rec_buf, 0, len, offset + 4);
-      const post = decode_record(rec_buf);
-      fn(index, post);
-    }
-  } finally {
-    close_sync(fd);
-  }
+  return out;
 }

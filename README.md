@@ -61,8 +61,10 @@ no reading from outside the game state.
 
 Under the hood (short):
 - **Time sync + official ticks.** Clients continuously ping the server to align
-  clocks. Each post has client and server time; VibiNet assigns a deterministic
-  tick using `tolerance` so all clients agree.
+  clocks (nonce-matched requests over a monotonic local clock). Each post has
+  client and server time; VibiNet assigns a deterministic tick using
+  `tolerance` so all clients agree. The server clamps `client_time` to its own
+  monotone clock, so posts can never be scheduled in the future.
 - **Local prediction + rollback netcode.** Local posts apply immediately; when a
   late post arrives, VibiNet rewinds to that tick and replays forward.
 - **Snapshot caching.** Recent state snapshots are cached in a bounded window
@@ -313,18 +315,20 @@ const state = game.compute_render_state();
 ```
 
 If a websocket drops (idle tab, network change, sleep/wake), the client
-reconnects automatically and re-subscribes watched rooms. The room stream is
-replayed by index order, so state converges again after reconnect. Posts created
-while offline are queued and flushed on reconnect.
+reconnects automatically and re-subscribes watched rooms from its last seen
+index, so only missing posts are re-sent and state converges again after
+reconnect. Posts created while offline are queued and flushed on reconnect.
 
 Rendering is up to you — VibiNet only computes state.
 
 ## Self‑Hosting
 
 The VibiNet server is game‑agnostic. It:
-- assigns server time and orders posts,
+- assigns monotone server time and orders posts,
 - stores raw post payloads (it does not decode them),
 - broadcasts posts to watchers.
+
+Room names must match `[A-Za-z0-9_-]{1,64}` (they map to storage filenames).
 
 It never runs your game logic.
 

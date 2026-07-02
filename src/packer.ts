@@ -172,13 +172,24 @@ class BitWriter {
 class BitReader {
   private buf: Uint8Array;
   private bit_pos: number;
+  private bit_len: number;
 
   constructor(buf: Uint8Array) {
     this.buf = buf;
     this.bit_pos = 0;
+    this.bit_len = buf.length * 8;
+  }
+
+  // Reading past the end must throw: otherwise a truncated or malicious
+  // buffer silently decodes as zero bits (garbage values, ended lists).
+  private check_bounds(bits: number): void {
+    if (this.bit_pos + bits > this.bit_len) {
+      throw new RangeError("decode read past end of buffer");
+    }
   }
 
   read_bit(): 0 | 1 {
+    this.check_bounds(1);
     const byte_index = this.bit_pos >>> 3;
     const bit_index = this.bit_pos & 7;
     const bit = (this.buf[byte_index] >>> bit_index) & 1;
@@ -188,6 +199,7 @@ class BitReader {
 
   read_bitsUnsigned(bits: number): number | bigint {
     if (bits === 0) return 0;
+    this.check_bounds(bits);
 
     if (bits <= 32) {
       const aligned = (this.bit_pos & 7) === 0 && (bits & 7) === 0;
