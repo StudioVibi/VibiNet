@@ -15,7 +15,7 @@ walkers/
 └── README.md         # This file
 ```
 
-The game imports `src/vibi.ts` and `src/client.ts` from the parent directory, keeping the code DRY and organized.
+The game imports `src/client.ts` from the parent directory, keeping the code DRY and organized.
 
 ## How to Play
 

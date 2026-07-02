@@ -1,4 +1,4 @@
-import { VibiNet } from "../src/index.ts";
+import { Packed } from "../src/vibinet.ts";
 
 export type Player = {
   x: number;
@@ -20,7 +20,7 @@ export type Post =
   | { $: "down"; pid: number; key: Key }
   | { $: "up"; pid: number; key: Key };
 
-const key_packer: VibiNet.Packed = {
+const key_packer: Packed = {
   $: "Union",
   variants: {
     w: { $: "Struct", fields: {} },
@@ -30,7 +30,7 @@ const key_packer: VibiNet.Packed = {
   },
 };
 
-export const packer: VibiNet.Packed = {
+export const packer: Packed = {
   $: "Union",
   variants: {
     spawn: {

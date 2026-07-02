@@ -7,23 +7,34 @@ Clients replay the same input stream and compute the same game state.
 
 ## How VibiNet Works
 
-### Core runtime
+### File layout (exactly 3 source files, split by purity + platform)
 
-- `src/engine.ts`: PURE deterministic replay core (no IO, no mutation).
-  Finalization model: one base state + small pending window; checksums.
-- `src/vibi.ts`: thin stateful shell (`VibiNet.game`) around the engine:
-  owns the client, feeds engine events, memoizes computed states.
-- `src/client.ts`: WebSocket client, room ops, and time sync.
-- `src/index.ts`: public package exports.
-- `test/engine.test.ts`: pure-core property tests (order invariance,
-  finalization equivalence, prediction, checksums, non-mutation).
+- `src/vibinet.ts`: ALL pure code, zero platform deps. One Types section up
+  top, then one section per type: Writer/Reader (bit cursors), Packed (bit
+  packer), Check, Message (wire codec), Time, Post, State, Engine (replay
+  core: finalization model, one base state + small pending window,
+  checksums).
+- `src/client.ts`: the impure client side and package entry point. WebSocket
+  transport (`client_new`: reconnect, time sync, post queue) + the stateful
+  `VibiNet.game` shell (owns transport, engine value, state memos).
+  Re-exports everything from vibinet.ts.
+- `src/server.ts`: the impure server side (entry point: `bun run
+  src/server.ts`). Append-only disk storage (Store/Record sections),
+  watcher/stream bookkeeping, checkpoints, static HTTP for walkers.
+- Dependency graph is a strict line: `server.ts -> vibinet.ts <- client.ts`.
+
+### Naming discipline (bend.ts style)
+
+- Every top-level function is `<type>_<functionality>`: `engine_step`,
+  `packed_encode`, `message_decode`, `store_append`, `writer_bit`, ...
+- Sections are named after types (`// Engine`, `// Packed`, `// Store`).
+- All types of a file live in its leading `// Types` section.
+- Keep this discipline when adding code.
 
 ### Protocol and encoding
 
-- `src/packer.ts`: bit-level schema serializer/deserializer (bounds-checked decode).
-- `src/protocol.ts`: wire message schema and adapters.
-- `src/binary.ts`: binary helpers used by storage internals.
-- Protocol includes latest-index checkpoint messages used by replay safety.
+- Wire frames are a Packed Union (`Message` in vibinet.ts); decode is
+  bounds-checked (truncated frames throw, never yield zeros).
 - Time sync messages carry a nonce; only the reply to the latest request is
   accepted (stale replies would poison the clock offset).
 - `watch` carries a `from` index; there is no separate `load` message. The
@@ -34,9 +45,6 @@ Clients replay the same input stream and compute the same game state.
 
 ### Server side
 
-- `src/server.ts`: Bun HTTP + WebSocket server.
-- `src/storage.ts`: append-only room persistence.
-- `src/server_url.ts`: official endpoint constant and URL normalization.
 - Server streams room posts with per-connection ordered contiguous cursors.
 - Server time is monotone (post server_time never decreases in index) and
   client_time is clamped to it on ingestion (no future-dated posts).
@@ -45,14 +53,18 @@ Clients replay the same input stream and compute the same game state.
 
 ### Replay safety model
 
-- `frontier_ms` in `src/engine.ts` is the proven bound: no unseen post can
-  land before it. It advances by `server_time - tolerance` of contiguous
-  posts and checkpoints (NOT by `official_time`, which is not monotone in
+- `frontier_ms` in the Engine section is the proven bound: no unseen post
+  can land before it. It advances by `server_time - tolerance` of contiguous
+  posts and checkpoints (NOT by `post_time`, which is not monotone in
   index).
 - Ticks below the frontier are folded into `base_state` and discarded; a
   post below base is impossible by construction (monotone server time,
   contiguous delivery, tolerance clamp on both sides).
-- `state_at(tick)` answers any tick >= base; earlier ticks clamp to base.
+- `engine_state_at(tick)` answers any tick >= base; earlier ticks clamp to
+  base.
+- `test/engine.test.ts` holds the pure-core property tests (order
+  invariance, finalization equivalence, prediction, checksums,
+  non-mutation).
 - The shell memoizes computed states and invalidates them from the arriving
   post's tick onward.
 

@@ -1,6 +1,6 @@
 import { test, expect } from "bun:test";
-import { create_client } from "../src/client.ts";
-import { decode_message, encode_message, Message } from "../src/protocol.ts";
+import { client_new } from "../src/client.ts";
+import { message_decode, message_encode, Message } from "../src/vibinet.ts";
 
 type Listener = (event: any) => void;
 
@@ -59,7 +59,7 @@ class FakeWebSocket {
   }
 
   message(msg: Message): void {
-    const bytes = encode_message(msg);
+    const bytes = message_encode(msg);
     const view = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
     this.emit("message", { data: view });
   }
@@ -76,7 +76,7 @@ class FakeWebSocket {
 }
 
 function decode_sent(messages: Uint8Array[]): Message[] {
-  return messages.map((bytes) => decode_message(bytes));
+  return messages.map((bytes) => message_decode(bytes));
 }
 
 function last_time_nonce(socket: FakeWebSocket): number {
@@ -130,7 +130,7 @@ function with_fake_websocket(run: () => Promise<void> | void): Promise<void> {
 
 test("client ignores stale info_time replies (nonce mismatch)", async () => {
   await with_fake_websocket(async () => {
-    const client = create_client<number>("wss://example.test");
+    const client = client_new<number>("wss://example.test");
 
     const socket1 = FakeWebSocket.instances[0];
     expect(socket1).toBeDefined();
@@ -153,7 +153,7 @@ test("client ignores stale info_time replies (nonce mismatch)", async () => {
 test("client re-watches from its cursor after reconnect", async () => {
   await with_fake_websocket(async () => {
     const packer = { $: "UInt", size: 8 } as any;
-    const client = create_client<number>("wss://example.test");
+    const client = client_new<number>("wss://example.test");
 
     const socket1 = FakeWebSocket.instances[0];
     expect(socket1).toBeDefined();
@@ -194,7 +194,7 @@ test("client re-watches from its cursor after reconnect", async () => {
 test("client reconnects and re-watches tracked rooms", async () => {
   await with_fake_websocket(async () => {
     const packer = { $: "UInt", size: 8 } as any;
-    const client = create_client<number>("wss://example.test");
+    const client = client_new<number>("wss://example.test");
 
     const socket1 = FakeWebSocket.instances[0];
     expect(socket1).toBeDefined();
@@ -221,7 +221,7 @@ test("client reconnects and re-watches tracked rooms", async () => {
 test("client queues posts during disconnect and flushes after reconnect", async () => {
   await with_fake_websocket(async () => {
     const packer = { $: "UInt", size: 8 } as any;
-    const client = create_client<number>("wss://example.test");
+    const client = client_new<number>("wss://example.test");
 
     const socket1 = FakeWebSocket.instances[0];
     expect(socket1).toBeDefined();
@@ -252,7 +252,7 @@ test("client queues posts during disconnect and flushes after reconnect", async 
 test("client flushes all queued posts after reconnect", async () => {
   await with_fake_websocket(async () => {
     const packer = { $: "UInt", size: 8 } as any;
-    const client = create_client<number>("wss://example.test");
+    const client = client_new<number>("wss://example.test");
 
     const socket1 = FakeWebSocket.instances[0];
     expect(socket1).toBeDefined();

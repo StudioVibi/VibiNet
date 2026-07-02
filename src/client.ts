@@ -1,22 +1,62 @@
-import { decode, encode, Packed } from "./packer.ts";
-import { decode_message, encode_message } from "./protocol.ts";
-import { OFFICIAL_SERVER_URL, normalize_ws_url } from "./server_url.ts";
-import type { Check, RemotePost } from "./engine.ts";
+// The client side of VibiNet, and the package entry point. Everything
+// impure that runs on a player's machine lives here:
+// - client_new: the WebSocket transport (reconnect, time sync, post queue).
+// - VibiNet:    the stateful game shell around the pure engine (vibinet.ts).
+//
+// The shell owns three pieces of mutable state: the transport, the current
+// engine value, and a small memo of computed states. All game semantics are
+// pure functions in vibinet.ts.
 
-// Everything a watched room delivers: authoritative posts and server
-// checkpoints ("stream is complete through latest_index as of server_time").
-export type NetEvent<P> =
-  | { $: "post"; post: RemotePost<P> }
-  | { $: "checkpoint"; latest_index: number; server_time: number };
+import {
+  Check,
+  Config,
+  Desync,
+  Engine,
+  Event,
+  Packed,
+  check_from_wire,
+  check_to_wire,
+  engine_check,
+  engine_new,
+  engine_state_at,
+  engine_step,
+  message_decode,
+  message_encode,
+  packed_decode,
+  packed_encode,
+  post_tick,
+  time_to_tick,
+} from "./vibinet.ts";
 
+export * from "./vibinet.ts";
+
+// Types
+// -----
+
+// The transport seen by the shell. Injectable, for tests and simulation.
 export type ClientApi<P> = {
   on_sync: (callback: () => void) => void;
-  watch: (room: string, packer: Packed, handler?: (event: NetEvent<P>) => void) => void;
+  watch: (room: string, packer: Packed, handler?: (event: Event<P>) => void) => void;
   post: (room: string, data: P, packer: Packed, check?: Check | null) => string;
   server_time: () => number;
   ping: () => number;
   close: () => void;
   debug_dump?: () => unknown;
+};
+
+export type Options<S, P> = {
+  server?: string;
+  room: string;
+  initial: S;
+  on_tick: (state: S) => S;
+  on_post: (post: P, state: S) => S;
+  packer: Packed;
+  tick_rate: number;
+  tolerance: number;
+  smooth?: (remote: S, local: S) => S;
+  check_stride?: number;
+  on_desync?: (info: Desync) => void;
+  client?: ClientApi<P>;
 };
 
 type TimeSync = {
@@ -28,25 +68,17 @@ type TimeSync = {
   avg_ping: number;
 };
 
-type EventHandler = (event: NetEvent<any>) => void;
-type RoomWatcher = { handler?: EventHandler; packer: Packed };
+type Watcher = { handler?: (event: Event<any>) => void; packer: Packed };
 
-// Monotonic local clock. Wall clocks (Date.now) can step backwards or jump
-// on NTP adjustments and sleep/wake, which would poison the clock offset.
-function now(): number {
-  return Math.floor(performance.now());
-}
+// Name
+// ----
 
-function default_ws_url(): string {
-  return OFFICIAL_SERVER_URL;
-}
-
-export function gen_name(): string {
+// Random 8-char id (post names, room names).
+export function name_gen(): string {
   // Exactly 64 chars so `% 64` maps uniformly.
   const alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-";
   const bytes = new Uint8Array(8);
   const can_crypto = typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function";
-
   if (can_crypto) {
     crypto.getRandomValues(bytes);
   } else {
@@ -54,16 +86,56 @@ export function gen_name(): string {
       bytes[i] = Math.floor(Math.random() * 256);
     }
   }
-
   let out = "";
   for (let i = 0; i < 8; i++) {
     out += alphabet[bytes[i] % 64];
   }
-
   return out;
 }
 
-export function create_client<P>(server?: string): ClientApi<P> {
+// Url
+// ---
+
+export const OFFICIAL_SERVER_URL = "wss://net.studiovibi.com";
+
+export function url_normalize(raw_url: string): string {
+  let ws_url = raw_url;
+
+  try {
+    const url = new URL(raw_url);
+    if (url.protocol === "http:") {
+      url.protocol = "ws:";
+    } else if (url.protocol === "https:") {
+      url.protocol = "wss:";
+    }
+    ws_url = url.toString();
+  } catch {
+    ws_url = raw_url;
+  }
+
+  const is_https_page =
+    typeof window !== "undefined" && window.location.protocol === "https:";
+  if (is_https_page && ws_url.startsWith("ws://")) {
+    const upgraded = `wss://${ws_url.slice("ws://".length)}`;
+    console.warn(
+      `[VibiNet] Upgrading insecure WebSocket URL "${ws_url}" to "${upgraded}" because the page is HTTPS.`
+    );
+    return upgraded;
+  }
+
+  return ws_url;
+}
+
+// Client
+// ------
+
+// Monotonic local clock. Wall clocks (Date.now) can step backwards or jump
+// on NTP adjustments and sleep/wake, which would poison the clock offset.
+function client_now(): number {
+  return Math.floor(performance.now());
+}
+
+export function client_new<P>(server?: string): ClientApi<P> {
   const time_sync: TimeSync = {
     clock_offset: Infinity,
     lowest_ping: Infinity,
@@ -73,7 +145,7 @@ export function create_client<P>(server?: string): ClientApi<P> {
     avg_ping: Infinity,
   };
 
-  const room_watchers = new Map<string, RoomWatcher>();
+  const room_watchers = new Map<string, Watcher>();
   const watched_rooms = new Set<string>();
   // Next contiguous index expected per room; on reconnect we re-watch from
   // here so the server only re-sends what we haven't seen.
@@ -87,13 +159,13 @@ export function create_client<P>(server?: string): ClientApi<P> {
   let ws: WebSocket | null = null;
   const pending_posts: Uint8Array[] = [];
 
-  const ws_url = normalize_ws_url(server ?? default_ws_url());
+  const ws_url = url_normalize(server ?? OFFICIAL_SERVER_URL);
 
   function server_time(): number {
     if (!isFinite(time_sync.clock_offset)) {
       throw new Error("server_time() called before initial sync");
     }
-    return Math.floor(now() + time_sync.clock_offset);
+    return Math.floor(client_now() + time_sync.clock_offset);
   }
 
   function clear_heartbeat(): void {
@@ -142,12 +214,12 @@ export function create_client<P>(server?: string): ClientApi<P> {
       return;
     }
     time_sync.request_nonce = (time_sync.request_nonce + 1) >>> 0;
-    time_sync.request_sent_at = now();
-    ws.send(encode_message({ $: "get_time", nonce: time_sync.request_nonce }));
+    time_sync.request_sent_at = client_now();
+    ws.send(message_encode({ $: "get_time", nonce: time_sync.request_nonce }));
   }
 
   function watch_message(room: string): Uint8Array {
-    return encode_message({
+    return message_encode({
       $: "watch",
       room,
       from: room_cursors.get(room) ?? 0,
@@ -178,7 +250,11 @@ export function create_client<P>(server?: string): ClientApi<P> {
     connect();
   }
 
-  function register_handler(room: string, packer: Packed, handler?: EventHandler): void {
+  function register_handler(
+    room: string,
+    packer: Packed,
+    handler?: (event: Event<any>) => void
+  ): void {
     const existing = room_watchers.get(room);
     if (existing) {
       if (existing.packer !== packer) {
@@ -240,7 +316,7 @@ export function create_client<P>(server?: string): ClientApi<P> {
         event.data instanceof ArrayBuffer
           ? new Uint8Array(event.data)
           : new Uint8Array(event.data);
-      const msg = decode_message(data);
+      const msg = message_decode(data);
 
       switch (msg.$) {
         case "info_time": {
@@ -250,7 +326,7 @@ export function create_client<P>(server?: string): ClientApi<P> {
           if (msg.nonce !== time_sync.request_nonce) {
             break;
           }
-          const t = now();
+          const t = client_now();
           const ping = t - time_sync.request_sent_at;
 
           time_sync.last_ping = ping;
@@ -281,10 +357,6 @@ export function create_client<P>(server?: string): ClientApi<P> {
           }
           const watcher = room_watchers.get(msg.room);
           if (watcher && watcher.handler) {
-            const data = decode(watcher.packer, msg.payload);
-            const check = msg.check.$ === "some"
-              ? { tick: msg.check.tick, hash: msg.check.hash }
-              : null;
             watcher.handler({
               $: "post",
               post: {
@@ -292,13 +364,14 @@ export function create_client<P>(server?: string): ClientApi<P> {
                 server_time: msg.server_time,
                 client_time: msg.client_time,
                 name: msg.name,
-                check,
-                data,
+                check: check_from_wire(msg.check),
+                data: packed_decode(watcher.packer, msg.payload),
               },
             });
           }
           break;
         }
+
         case "checkpoint": {
           const watcher = room_watchers.get(msg.room);
           if (watcher && watcher.handler) {
@@ -347,15 +420,14 @@ export function create_client<P>(server?: string): ClientApi<P> {
       send_or_reconnect(watch_message(room));
     },
     post: (room, data, packer, check) => {
-      const name = gen_name();
-      const payload = encode(packer, data);
-      const message = encode_message({
+      const name = name_gen();
+      const message = message_encode({
         $: "post",
         room,
         time: server_time(),
         name,
-        check: check ? { $: "some", tick: check.tick, hash: check.hash } : { $: "none" },
-        payload,
+        check: check_to_wire(check ?? null),
+        payload: packed_encode(packer, data),
       });
       if (pending_posts.length > 0) {
         flush_pending_posts_if_open();
@@ -376,7 +448,7 @@ export function create_client<P>(server?: string): ClientApi<P> {
       if (ws && ws.readyState === WebSocket.OPEN) {
         for (const room of watched_rooms.values()) {
           try {
-            ws.send(encode_message({ $: "unwatch", room }));
+            ws.send(message_encode({ $: "unwatch", room }));
           } catch {
             break;
           }
@@ -398,14 +470,244 @@ export function create_client<P>(server?: string): ClientApi<P> {
       room_cursors: Object.fromEntries(room_cursors.entries()),
       room_watchers: Array.from(room_watchers.keys()),
       sync_listener_count: sync_listeners.length,
-      time_sync: {
-        clock_offset: time_sync.clock_offset,
-        lowest_ping: time_sync.lowest_ping,
-        request_sent_at: time_sync.request_sent_at,
-        request_nonce: time_sync.request_nonce,
-        last_ping: time_sync.last_ping,
-        avg_ping: time_sync.avg_ping,
-      },
+      time_sync: { ...time_sync },
     }),
   };
+}
+
+// VibiNet
+// -------
+//
+// The game object. Rendering uses two states per frame:
+// - local_state:  current tick, including local predictions (instant input).
+// - remote_state: a stable past tick, `max(tolerance, half_rtt + 1 tick)`
+//   behind, where rollbacks are not expected.
+// `smooth(remote, local)` blends them; the default returns remote. Games
+// typically keep the local player from `local` and everyone else from
+// `remote`.
+
+const MEMO_SLOTS = 4;
+
+export class VibiNet<S, P> {
+  static game = VibiNet;
+
+  room:       string;
+  packer:     Packed;
+  tick_rate:  number;
+  tolerance:  number;
+  smooth:     (remote: S, local: S) => S;
+  cfg:        Config<S, P>;
+  engine:     Engine<S, P>;
+  client_api: ClientApi<P>;
+
+  private memos: Array<{ tick: number; state: S }>;
+  private on_desync_cb: ((info: Desync) => void) | null;
+  private desync_fired: boolean;
+
+  constructor(options: Options<S, P>) {
+    this.room       = options.room;
+    this.packer     = options.packer;
+    this.tick_rate  = options.tick_rate;
+    this.tolerance  = options.tolerance;
+    this.smooth     = options.smooth ?? ((remote: S, _local: S) => remote);
+    this.cfg        = {
+      initial:      options.initial,
+      on_tick:      options.on_tick,
+      on_post:      options.on_post,
+      tick_rate:    options.tick_rate,
+      tolerance:    options.tolerance,
+      check_stride: options.check_stride,
+    };
+    this.engine        = engine_new(this.cfg);
+    this.client_api    = options.client ?? client_new<P>(options.server);
+    this.memos         = [];
+    this.on_desync_cb  = options.on_desync ?? null;
+    this.desync_fired  = false;
+
+    this.client_api.on_sync(() => {
+      this.client_api.watch(this.room, this.packer, (event) => {
+        this.on_event(event);
+      });
+    });
+  }
+
+  // Send an input. It applies locally right away (prediction) and is
+  // replaced by the server echo. Throws if called before on_sync.
+  post(data: P): void {
+    const check = engine_check(this.engine);
+    const name  = this.client_api.post(this.room, data, this.packer, check);
+    const t     = this.server_time();
+    this.engine = engine_step(this.engine, {
+      $: "local_post",
+      post: { name, client_time: t, data },
+    }, this.cfg);
+    this.invalidate(this.time_to_tick(t));
+  }
+
+  // State to draw this frame: smooth(stable past, predicted present).
+  compute_render_state(): S {
+    const curr_tick = this.server_tick();
+    const tick_ms   = 1000 / this.tick_rate;
+    const tol_ticks = Math.ceil(this.tolerance / tick_ms);
+    const rtt_ms    = this.client_api.ping();
+    const half_rtt  = isFinite(rtt_ms) ? Math.ceil((rtt_ms / 2) / tick_ms) : 0;
+    const lag       = Math.max(tol_ticks, half_rtt + 1);
+    const base      = this.finalized_tick() ?? 0;
+    const remote_tick = Math.max(base, curr_tick - lag, 0);
+
+    const remote_state = this.compute_state_at(remote_tick);
+    const local_state  = this.compute_state_at(curr_tick);
+    return this.smooth(remote_state, local_state);
+  }
+
+  // State at the current server tick (with local prediction).
+  compute_current_state(): S {
+    return this.compute_state_at(this.server_tick());
+  }
+
+  // State at an arbitrary tick >= finalized_tick() (earlier ticks clamp to
+  // the finalized state; their history has been folded away).
+  compute_state_at(tick: number): S {
+    let hint: { tick: number; state: S } | undefined;
+    for (const memo of this.memos) {
+      if (memo.tick <= tick && (!hint || memo.tick > hint.tick)) {
+        hint = memo;
+      }
+    }
+    const state = engine_state_at(this.engine, tick, this.cfg, hint);
+    this.remember(tick, state);
+    return state;
+  }
+
+  time_to_tick(ms: number): number {
+    return time_to_tick(ms, this.tick_rate);
+  }
+
+  server_time(): number {
+    return this.client_api.server_time();
+  }
+
+  server_tick(): number {
+    return this.time_to_tick(this.server_time());
+  }
+
+  // Newest tick whose history is final (never rolls back). Null before the
+  // room's first post is known.
+  finalized_tick(): number | null {
+    return this.engine.base_tick;
+  }
+
+  // Tick of the room's first post (null if none seen yet).
+  initial_tick(): number | null {
+    return this.engine.initial_tick;
+  }
+
+  post_count(): number {
+    return this.engine.max_index + 1;
+  }
+
+  ping(): number {
+    return this.client_api.ping();
+  }
+
+  desync(): Desync | null {
+    return this.engine.desync;
+  }
+
+  on_sync(callback: () => void): void {
+    this.client_api.on_sync(callback);
+  }
+
+  close(): void {
+    this.client_api.close();
+  }
+
+  debug_dump(): unknown {
+    let server_time: number | null = null;
+    try {
+      server_time = this.server_time();
+    } catch {
+      server_time = null;
+    }
+    return {
+      room: this.room,
+      tick_rate: this.tick_rate,
+      tolerance: this.tolerance,
+      server_time,
+      server_tick: server_time === null ? null : this.time_to_tick(server_time),
+      ping: this.ping(),
+      engine: {
+        base_tick: this.engine.base_tick,
+        initial_tick: this.engine.initial_tick,
+        frontier_ms: this.engine.frontier_ms,
+        next_index: this.engine.next_index,
+        max_index: this.engine.max_index,
+        pending_posts: this.engine.posts.size,
+        pending_locals: this.engine.locals.size,
+        checks: this.engine.checks,
+        desync: this.engine.desync,
+      },
+      memo_ticks: this.memos.map((memo) => memo.tick),
+      client_debug: this.client_api.debug_dump?.() ?? null,
+    };
+  }
+
+  static name_gen(): string {
+    return name_gen();
+  }
+
+  private on_event(event: Event<P>): void {
+    if (event.$ === "post") {
+      // The post invalidates computed states from its tick on; if it echoes
+      // a local prediction, from the prediction's tick on.
+      let dirty = post_tick(event.post, this.cfg);
+      const name = event.post.name;
+      if (name !== undefined) {
+        const local = this.engine.locals.get(name);
+        if (local) {
+          dirty = Math.min(dirty, this.time_to_tick(local.client_time));
+        }
+      }
+      this.engine = engine_step(this.engine, event, this.cfg);
+      this.invalidate(dirty);
+      this.report_desync();
+    } else {
+      // Checkpoints only advance finalization; past states stay valid.
+      this.engine = engine_step(this.engine, event, this.cfg);
+    }
+  }
+
+  private invalidate(from_tick: number): void {
+    this.memos = this.memos.filter((memo) => memo.tick < from_tick);
+  }
+
+  private remember(tick: number, state: S): void {
+    this.memos = this.memos.filter((memo) => memo.tick !== tick);
+    this.memos.push({ tick, state });
+    if (this.memos.length > MEMO_SLOTS) {
+      this.memos.shift();
+    }
+  }
+
+  private report_desync(): void {
+    if (this.desync_fired || this.engine.desync === null) {
+      return;
+    }
+    this.desync_fired = true;
+    const info = this.engine.desync;
+    console.error(
+      `[VIBI] DESYNC at tick ${info.tick}: local hash ${info.ours} != remote hash ${info.theirs}`
+    );
+    if (this.on_desync_cb) {
+      this.on_desync_cb(info);
+    }
+  }
+}
+
+type PackedAlias = Packed;
+type OptionsAlias<S, P> = Options<S, P>;
+
+export namespace VibiNet {
+  export type Packed = PackedAlias;
+  export type Options<S, P> = OptionsAlias<S, P>;
 }

@@ -10,9 +10,10 @@ prediction; late posts trigger an automatic rollback + replay. Proven-final
 history is folded into a single base state, so memory and rollback cost stay
 bounded, and clients cross-check state hashes to detect divergence.
 
-The replay core itself is a pure library (`src/engine.ts`): plain data in,
-plain data out, no IO. The `VibiNet.game` class is a thin shell that owns
-the socket and feeds it events.
+The library is split by purity: `src/vibinet.ts` is the entire pure core
+(bit packer, wire codec, replay engine) — plain data in, plain data out, no
+IO. `src/client.ts` is the client shell (WebSocket transport + the stateful
+`VibiNet.game` class) and `src/server.ts` is the server entry point.
 
 Requirements: your logic must be deterministic. Same inputs, same order, same
 result. No `Math.random()`, no `Date.now()`, no reads outside the state, and
@@ -145,22 +146,23 @@ your state type, `P` your post type.
 | `desync()`                 | `Desync \| null` | Non-null if a peer's finalized-state hash disagreed with ours. |
 | `close()`                  | `void`     | Unwatches and closes the connection. |
 | `debug_dump()`             | dump       | Engine + transport introspection. |
-| `VibiNet.gen_name()`       | `string`   | Static. Random 8-char id (useful for room names). |
+| `VibiNet.name_gen()`       | `string`   | Static. Random 8-char id (useful for room names). |
 
 ### Other exports
 
 ```ts
-import { VibiNet, create_client, gen_name, OFFICIAL_SERVER_URL } from "vibinet";
+import { VibiNet, client_new, name_gen, OFFICIAL_SERVER_URL } from "vibinet";
 ```
 
-- `create_client(server?)` — the raw WebSocket transport (`ClientApi`), only
+- `client_new(server?)` — the raw WebSocket transport (`ClientApi`), only
   needed to build custom transports or tests.
-- `engine` — the pure replay core (`new_engine`, `step`, `state_at`, ...).
+- The pure core (`engine_new`, `engine_step`, `engine_state_at`,
+  `packed_encode`, `packed_decode`, `message_encode`, `message_decode`, ...).
   Use it directly for headless simulation or property tests; `VibiNet.game`
   is a thin IO shell around it.
 - `OFFICIAL_SERVER_URL` — `wss://net.studiovibi.com`.
 - Types: `VibiNet.Packed`, `VibiNet.Options<S, P>`, `ClientApi<P>`,
-  `NetEvent<P>`.
+  `Event<P>`, `Engine<S, P>`, `Config<S, P>`.
 
 ## Time Model
 

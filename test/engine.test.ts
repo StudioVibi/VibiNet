@@ -5,16 +5,16 @@
 import { test, expect } from "bun:test";
 import {
   Engine,
-  EngineConfig,
-  EngineEvent,
-  RemotePost,
-  new_engine,
-  step,
-  state_at,
-  official_tick,
-  latest_check,
-  hash_state,
-} from "../src/engine.ts";
+  Config,
+  Event,
+  Post as NetPost,
+  engine_new,
+  engine_step,
+  engine_state_at,
+  engine_check,
+  post_tick,
+  state_hash,
+} from "../src/vibinet.ts";
 import {
   Post,
   State,
@@ -26,7 +26,7 @@ import {
 } from "./walkers_game.ts";
 import { create_rng, rand_int } from "./sim_network.ts";
 
-const cfg: EngineConfig<State, Post> = {
+const cfg: Config<State, Post> = {
   initial,
   on_tick,
   on_post,
@@ -45,9 +45,9 @@ function key(action: "down" | "up", pid: string, k: "w" | "a" | "s" | "d"): Post
   return { $: action, pid: pid.charCodeAt(0), key: { $: k } };
 }
 
-function make_posts(): RemotePost<Post>[] {
+function make_posts(): NetPost<Post>[] {
   const rng = create_rng(42);
-  const posts: RemotePost<Post>[] = [];
+  const posts: NetPost<Post>[] = [];
   const specs: Post[] = [
     spawn("A", 100, 100),
     spawn("B", 300, 300),
@@ -77,18 +77,18 @@ function make_posts(): RemotePost<Post>[] {
 }
 
 // Fold everything from scratch: the trivially correct reference.
-function reference_state(posts: RemotePost<Post>[], at_tick: number): State {
+function reference_state(posts: NetPost<Post>[], at_tick: number): State {
   const anchor = posts.find((p) => p.index === 0);
   if (!anchor) {
     return initial;
   }
-  const initial_tick = official_tick(cfg, anchor);
+  const initial_tick = post_tick(anchor, cfg);
   if (at_tick < initial_tick) {
     return initial;
   }
-  const buckets = new Map<number, RemotePost<Post>[]>();
+  const buckets = new Map<number, NetPost<Post>[]>();
   for (const post of posts) {
-    const tick = Math.max(official_tick(cfg, post), initial_tick);
+    const tick = Math.max(post_tick(post, cfg), initial_tick);
     const bucket = buckets.get(tick) ?? [];
     bucket.push(post);
     buckets.set(tick, bucket);
@@ -106,10 +106,10 @@ function reference_state(posts: RemotePost<Post>[], at_tick: number): State {
   return state;
 }
 
-function feed(events: EngineEvent<Post>[]): Engine<State, Post> {
-  let engine = new_engine(cfg);
+function feed(events: Event<Post>[]): Engine<State, Post> {
+  let engine = engine_new(cfg);
   for (const event of events) {
-    engine = step(cfg, engine, event);
+    engine = engine_step(engine, event, cfg);
   }
   return engine;
 }
@@ -126,16 +126,16 @@ function shuffled<A>(rng: () => number, xs: A[]): A[] {
 test("delivery order does not matter (posts buffer until contiguous)", () => {
   const posts = make_posts();
   const last_time = posts[posts.length - 1].server_time;
-  const final_checkpoint: EngineEvent<Post> = {
+  const final_checkpoint: Event<Post> = {
     $: "checkpoint",
     latest_index: posts.length - 1,
     server_time: last_time + 2000,
   };
   const in_order = feed([
-    ...posts.map((post): EngineEvent<Post> => ({ $: "post", post })),
+    ...posts.map((post): Event<Post> => ({ $: "post", post })),
     final_checkpoint,
   ]);
-  const probe = official_tick(cfg, posts[posts.length - 1]) + 10;
+  const probe = post_tick(posts[posts.length - 1], cfg) + 10;
 
   const rng = create_rng(7);
   for (let round = 0; round < 20; round++) {
@@ -143,73 +143,73 @@ test("delivery order does not matter (posts buffer until contiguous)", () => {
     // Duplicate a random post too.
     const dup = order[rand_int(rng, 0, order.length - 1)];
     const engine = feed([
-      ...order.map((post): EngineEvent<Post> => ({ $: "post", post })),
+      ...order.map((post): Event<Post> => ({ $: "post", post })),
       { $: "post", post: dup },
       final_checkpoint,
     ]);
     expect(engine.base_tick).toEqual(in_order.base_tick);
     expect(engine.base_state).toEqual(in_order.base_state);
-    expect(state_at(cfg, engine, probe)).toEqual(state_at(cfg, in_order, probe));
+    expect(engine_state_at(engine, probe, cfg)).toEqual(engine_state_at(in_order, probe, cfg));
     expect(engine.checks).toEqual(in_order.checks);
   }
 });
 
 test("finalized replay equals full replay from scratch", () => {
   const posts = make_posts();
-  let engine = new_engine(cfg);
+  let engine = engine_new(cfg);
   let time = T0;
   for (const post of posts) {
-    engine = step(cfg, engine, { $: "post", post });
+    engine = engine_step(engine, { $: "post", post }, cfg);
     // Interleave checkpoints so finalization advances incrementally.
     time = post.server_time + 100;
-    engine = step(cfg, engine, {
+    engine = engine_step(engine, {
       $: "checkpoint",
       latest_index: post.index,
       server_time: time,
-    });
+    }, cfg);
   }
   expect(engine.base_tick).not.toBeNull();
   expect(engine.posts.size).toBeLessThan(posts.length); // folding happened
 
-  const last_tick = official_tick(cfg, posts[posts.length - 1]);
+  const last_tick = post_tick(posts[posts.length - 1], cfg);
   for (let tick = engine.base_tick as number; tick <= last_tick + 20; tick++) {
-    expect(state_at(cfg, engine, tick)).toEqual(reference_state(posts, tick));
+    expect(engine_state_at(engine, tick, cfg)).toEqual(reference_state(posts, tick));
   }
 });
 
 test("checkpoints with unseen indices are ignored (gap safety)", () => {
   const posts = make_posts();
-  let engine = new_engine(cfg);
+  let engine = engine_new(cfg);
   // Deliver posts 0..2, then a checkpoint claiming completeness through 7.
   for (const post of posts.slice(0, 3)) {
-    engine = step(cfg, engine, { $: "post", post });
+    engine = engine_step(engine, { $: "post", post }, cfg);
   }
-  const bogus = step(cfg, engine, {
+  const bogus = engine_step(engine, {
     $: "checkpoint",
     latest_index: 7,
     server_time: posts[7].server_time + 1000,
-  });
+  }, cfg);
   expect(bogus.frontier_ms).toBe(engine.frontier_ms);
 });
 
 test("local prediction applies instantly and is replaced by its echo", () => {
   const posts = make_posts();
-  let engine = feed(posts.map((post): EngineEvent<Post> => ({ $: "post", post })));
+  let engine = feed(posts.map((post): Event<Post> => ({ $: "post", post })));
 
   const last = posts[posts.length - 1];
   const t = last.server_time + 500;
   const move: Post = key("down", "A", "a");
-  engine = step(cfg, engine, {
+  engine = engine_step(engine, {
     $: "local_post",
     post: { name: "mine", client_time: t, data: move },
-  });
+  }, cfg);
 
   // Predicted: the key is down at the local tick.
-  const tick = official_tick(cfg, { server_time: t, client_time: t });
-  expect((state_at(cfg, engine, tick) as State)["A"].a).toBe(1);
+  const tick = post_tick({ server_time: t, client_time: t }, cfg);
+  expect((engine_state_at(engine, tick, cfg) as State)["A"].a).toBe(1);
 
   // Echo arrives: local removed, authoritative post takes over, same effect.
-  engine = step(cfg, engine, {
+  engine = engine_step(engine, {
     $: "post",
     post: {
       index: posts.length,
@@ -219,10 +219,10 @@ test("local prediction applies instantly and is replaced by its echo", () => {
       check: null,
       data: move,
     },
-  });
+  }, cfg);
   expect(engine.locals.size).toBe(0);
-  expect((state_at(cfg, engine, tick) as State)["A"].a).toBe(1);
-  expect(state_at(cfg, engine, tick)).toEqual(
+  expect((engine_state_at(engine, tick, cfg) as State)["A"].a).toBe(1);
+  expect(engine_state_at(engine, tick, cfg)).toEqual(
     reference_state(
       [...posts, {
         index: posts.length,
@@ -240,8 +240,8 @@ test("local prediction applies instantly and is replaced by its echo", () => {
 test("checksums match between identical clients and flag divergent ones", () => {
   const posts = make_posts();
   const last_time = posts[posts.length - 1].server_time;
-  const events: EngineEvent<Post>[] = [
-    ...posts.map((post): EngineEvent<Post> => ({ $: "post", post })),
+  const events: Event<Post>[] = [
+    ...posts.map((post): Event<Post> => ({ $: "post", post })),
     { $: "checkpoint", latest_index: posts.length - 1, server_time: last_time + 5000 },
   ];
 
@@ -252,8 +252,8 @@ test("checksums match between identical clients and flag divergent ones", () => 
   expect(a.desync).toBeNull();
 
   // A post carrying a matching checksum: no desync.
-  const check = latest_check(a);
-  const next_post = (check_hash: number): EngineEvent<Post> => ({
+  const check = engine_check(a);
+  const next_post = (check_hash: number): Event<Post> => ({
     $: "post",
     post: {
       index: posts.length,
@@ -264,32 +264,32 @@ test("checksums match between identical clients and flag divergent ones", () => 
       data: key("down", "B", "w"),
     },
   });
-  expect(step(cfg, a, next_post((check as any).hash)).desync).toBeNull();
+  expect(engine_step(a, next_post((check as any).hash), cfg).desync).toBeNull();
 
   // A post carrying a different hash for the same tick: desync detected.
-  const bad = step(cfg, a, next_post(((check as any).hash ^ 0xdeadbeef) >>> 0));
+  const bad = engine_step(a, next_post(((check as any).hash ^ 0xdeadbeef) >>> 0), cfg);
   expect(bad.desync).not.toBeNull();
   expect(bad.desync!.tick).toBe((check as any).tick);
 });
 
 test("step never mutates its input engine", () => {
   const posts = make_posts();
-  const events: EngineEvent<Post>[] = posts.map((post) => ({ $: "post", post }));
-  let engine = new_engine(cfg);
+  const events: Event<Post>[] = posts.map((post) => ({ $: "post", post }));
+  let engine = engine_new(cfg);
   for (const event of events) {
     const before = {
       base_tick: engine.base_tick,
       next_index: engine.next_index,
       posts: new Map(engine.posts),
       locals: new Map(engine.locals),
-      hash: hash_state(engine.base_state),
+      hash: state_hash(engine.base_state),
     };
-    const next = step(cfg, engine, event);
+    const next = engine_step(engine, event, cfg);
     expect(engine.base_tick).toBe(before.base_tick);
     expect(engine.next_index).toBe(before.next_index);
     expect(engine.posts).toEqual(before.posts);
     expect(engine.locals).toEqual(before.locals);
-    expect(hash_state(engine.base_state)).toBe(before.hash);
+    expect(state_hash(engine.base_state)).toBe(before.hash);
     engine = next;
   }
 });

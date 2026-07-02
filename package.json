@@ -3,14 +3,14 @@
   "version": "0.3.0",
   "description": "Deterministic input-synced netcode engine for real-time games.",
   "type": "module",
-  "main": "./dist/index.js",
-  "module": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "main": "./dist/client.js",
+  "module": "./dist/client.js",
+  "types": "./dist/client.d.ts",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "default": "./dist/index.js"
+      "types": "./dist/client.d.ts",
+      "import": "./dist/client.js",
+      "default": "./dist/client.js"
     }
   },
   "files": [
@@ -19,8 +19,8 @@
   ],
   "sideEffects": false,
   "scripts": {
-    "build:js": "npx esbuild src/index.ts --bundle --format=esm --platform=browser --target=es2020 --outfile=dist/index.js",
-    "build:types": "npx tsc src/index.ts --declaration --emitDeclarationOnly --outDir dist --module ESNext --moduleResolution bundler --target ESNext --strict --esModuleInterop --skipLibCheck --allowImportingTsExtensions",
+    "build:js": "npx esbuild src/client.ts --bundle --format=esm --platform=browser --target=es2020 --outfile=dist/client.js",
+    "build:types": "npx tsc src/client.ts --declaration --emitDeclarationOnly --outDir dist --module ESNext --moduleResolution bundler --target ESNext --strict --esModuleInterop --skipLibCheck --allowImportingTsExtensions",
     "build": "npm run build:js && npm run build:types",
     "check:official-endpoint": "bash scripts/check-official-endpoint.sh",
     "prepack": "npm run check:official-endpoint && npm run build",

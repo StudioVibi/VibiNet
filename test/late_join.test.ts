@@ -15,7 +15,7 @@ import {
   packer,
 } from "./walkers_game.ts";
 
-const { VibiNet } = await import("../src/vibi.ts");
+const { VibiNet } = await import("../src/client.ts");
 
 const ROOM = "late-join-room";
 const PROFILE = {
