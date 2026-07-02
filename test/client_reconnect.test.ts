@@ -173,6 +173,7 @@ test("client re-watches from its cursor after reconnect", async () => {
         server_time: 1000 + i,
         client_time: 1000 + i,
         name: `p${i}`,
+        check: { $: "none" },
         payload: new Uint8Array([i]),
       });
     }

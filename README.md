@@ -6,12 +6,19 @@ You write your game as two pure functions (`on_tick`, `on_post`). VibiNet
 syncs **inputs**, not state: the server timestamps, orders, stores, and
 broadcasts posts; every client replays the same post stream through the same
 pure functions and computes the same state. Local inputs apply instantly via
-prediction; late posts trigger an automatic rollback + replay from cached
-snapshots.
+prediction; late posts trigger an automatic rollback + replay. Proven-final
+history is folded into a single base state, so memory and rollback cost stay
+bounded, and clients cross-check state hashes to detect divergence.
+
+The replay core itself is a pure library (`src/engine.ts`): plain data in,
+plain data out, no IO. The `VibiNet.game` class is a thin shell that owns
+the socket and feeds it events.
 
 Requirements: your logic must be deterministic. Same inputs, same order, same
-result. No `Math.random()`, no `Date.now()`, no reads outside the state. Both
-functions must treat state as immutable (return new objects, never mutate).
+result. No `Math.random()`, no `Date.now()`, no reads outside the state, and
+no transcendental math (`Math.sin`, `Math.pow`, ... are not bit-exact across
+engines; float `+ - * /` is fine). Both functions must treat state as
+immutable (return new objects, never mutate).
 
 ## Install
 
@@ -115,9 +122,8 @@ your state type, `P` your post type.
 | `tolerance`       | `number`                | required           | Max ms an input may apply in the past (see Time Model). |
 | `server`          | `string`                | official server    | WebSocket URL. `http(s)://` is auto-upgraded to `ws(s)://`. |
 | `smooth`          | `(remote: S, local: S) => S` | `(r, l) => r` | Blends stable past + predicted present (see below). |
-| `cache`           | `boolean`               | `true`             | Snapshot caching. Off = full replay per call (debug only). |
-| `snapshot_stride` | `number`                | `8`                | Ticks between snapshots. |
-| `snapshot_count`  | `number`                | `256`              | Snapshots kept. Rollback window = `stride * count` ticks. |
+| `check_stride`    | `number`                | `64`               | Ticks between finalized-state checksums (desync detection). |
+| `on_desync`       | `(info) => void`        | none               | Called once if a peer's state hash disagrees with ours. |
 | `client`          | `ClientApi<P>`          | real WebSocket     | Injectable transport, for tests/simulation. |
 
 ### Methods
@@ -128,16 +134,17 @@ your state type, `P` your post type.
 | `post(data: P)`            | `void`     | Sends an input and applies it locally right away (prediction). Throws if called before sync. Queued and flushed if the socket is down. |
 | `compute_render_state()`   | `S`        | State to draw this frame: `smooth(remote_state, local_state)`. |
 | `compute_current_state()`  | `S`        | State at the current server tick (with local prediction). |
-| `compute_state_at(tick)`   | `S`        | State at an arbitrary tick (clamped to known-complete history). |
+| `compute_state_at(tick)`   | `S`        | State at any tick >= `finalized_tick()` (earlier ticks clamp: their history is folded away). |
 | `server_time()`            | `number`   | Synced server time in ms. Throws before first sync. |
 | `server_tick()`            | `number`   | `time_to_tick(server_time())`. |
 | `time_to_tick(ms)`         | `number`   | `floor(ms * tick_rate / 1000)`. |
 | `ping()`                   | `number`   | Smoothed RTT in ms (`Infinity` before first sample). |
 | `post_count()`             | `number`   | Total posts seen in the room. |
-| `initial_time()` / `initial_tick()` | `number \| null` | Time/tick of the room's first post (`null` if none yet). |
+| `initial_tick()`           | `number \| null` | Tick of the room's first post (`null` if none yet). |
+| `finalized_tick()`         | `number \| null` | Newest tick whose history is final (never rolls back). |
+| `desync()`                 | `Desync \| null` | Non-null if a peer's finalized-state hash disagreed with ours. |
 | `close()`                  | `void`     | Unwatches and closes the connection. |
-| `debug_dump()`             | dump       | Full engine introspection (posts, timeline, snapshots, client). |
-| `debug_recompute(tick?)`   | dump       | Drops the cache and replays from scratch. Debug only. |
+| `debug_dump()`             | dump       | Engine + transport introspection. |
 | `VibiNet.gen_name()`       | `string`   | Static. Random 8-char id (useful for room names). |
 
 ### Other exports
@@ -148,9 +155,12 @@ import { VibiNet, create_client, gen_name, OFFICIAL_SERVER_URL } from "vibinet";
 
 - `create_client(server?)` — the raw WebSocket transport (`ClientApi`), only
   needed to build custom transports or tests.
+- `engine` — the pure replay core (`new_engine`, `step`, `state_at`, ...).
+  Use it directly for headless simulation or property tests; `VibiNet.game`
+  is a thin IO shell around it.
 - `OFFICIAL_SERVER_URL` — `wss://net.studiovibi.com`.
-- Types: `VibiNet.Packed`, `VibiNet.Options<S, P>`, `VibiNet.DebugDump<S, P>`,
-  `VibiNet.RecomputeDump<S>`.
+- Types: `VibiNet.Packed`, `VibiNet.Options<S, P>`, `ClientApi<P>`,
+  `NetEvent<P>`.
 
 ## Time Model
 
@@ -187,13 +197,25 @@ const smooth = (remote: State, local: State): State =>
   local[me] ? { ...remote, [me]: local[me] } : remote;
 ```
 
-### Rollback window
+### Finalization
 
-Snapshots cover `snapshot_stride * snapshot_count` ticks (default 2048 ticks
-= ~85 s at 24 tps). Posts older than the window are pruned only after the
-server proves no earlier post can still arrive, so history is never silently
-dropped. Late joiners replay the whole room to catch up. On reconnect, the
-client resumes from its last seen post index.
+The server periodically sends **checkpoints** ("the stream is complete
+through index N as of time T"). Contiguously received posts and checkpoints
+advance a proven frontier: no unseen post can land before it. Everything
+below the frontier is folded into a single base state and discarded — a post
+landing below it is impossible by construction, so history is never silently
+lost. The pending window past the base is small (tolerance + latency +
+checkpoint period, typically under 2 s), which bounds both memory and the
+cost of any rollback. Late joiners fold the whole room to catch up; on
+reconnect the client resumes from its last seen post index.
+
+### Desync detection
+
+While folding, each client hashes its finalized state every `check_stride`
+ticks and piggybacks the newest (tick, hash) on outgoing posts. Receivers
+compare against their own hash for that tick; a mismatch calls `on_desync`
+and sets `desync()`. Since finalized state is authoritative-only, matching
+logic always produces matching hashes.
 
 ## Packed Types
 
@@ -231,6 +253,8 @@ HOST=127.0.0.1 PORT=8080 bun run src/server.ts # behind a reverse proxy
 - Posts persist in `db/<room>.dat` + `db/<room>.idx` (append-only). Delete
   both files to reset a room.
 - Room names are restricted to `[A-Za-z0-9_-]{1,64}`.
+- `CHECKPOINT_MS` (default 1000) sets the checkpoint broadcast period; lower
+  values shrink the clients' pending window.
 - Client and server must run the same vibinet version: the wire protocol is
   not stable across minor versions (0.2.0 changed it).
 - Browser pages served over HTTPS must use `wss://` (the client auto-upgrades

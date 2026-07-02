@@ -1,3 +1,10 @@
+// sim_network.ts
+//
+// Deterministic in-memory simulation of the VibiNet network: a scheduler, a
+// server (posts + checkpoints, per-client contiguous streams), and clients
+// with configurable latency, jitter, clock offset, and duplicate delivery.
+// Mirrors src/server.ts + src/client.ts semantics for engine-level tests.
+
 export type RandFn = () => number;
 
 export function create_rng(seed: number): RandFn {
@@ -56,14 +63,20 @@ export class SimScheduler {
   }
 }
 
+export type SimCheck = { tick: number; hash: number };
+
 export type SimPost<P> = {
-  room: string;
   index: number;
   server_time: number;
   client_time: number;
   name?: string;
+  check: SimCheck | null;
   data: P;
 };
+
+export type SimEvent<P> =
+  | { $: "post"; post: SimPost<P> }
+  | { $: "checkpoint"; latest_index: number; server_time: number };
 
 export type ClientProfile = {
   uplink_ms: number;
@@ -75,12 +88,14 @@ export type ClientProfile = {
   duplicate_delay_ms?: { min: number; max: number };
 };
 
-type WatchHandler<P> = (post: SimPost<P>) => void;
+type EventHandler<P> = (event: SimEvent<P>) => void;
 
 type StreamState = {
   watching: boolean;
   next_to_send: number;
 };
+
+export const SIM_CHECKPOINT_MS = 500;
 
 export class SimServer<P> {
   scheduler: SimScheduler;
@@ -93,6 +108,26 @@ export class SimServer<P> {
     this.posts_by_room = new Map();
     this.watchers = new Map();
     this.streams = new Map();
+    this.schedule_checkpoints();
+  }
+
+  private schedule_checkpoints(): void {
+    this.scheduler.schedule(SIM_CHECKPOINT_MS, () => {
+      for (const [room, clients] of this.watchers.entries()) {
+        for (const client of clients) {
+          client.schedule_delivery(this.checkpoint_event(room));
+        }
+      }
+      this.schedule_checkpoints();
+    });
+  }
+
+  private checkpoint_event(room: string): SimEvent<P> {
+    return {
+      $: "checkpoint",
+      latest_index: this.get_posts(room).length - 1,
+      server_time: this.scheduler.now,
+    };
   }
 
   watch(room: string, client: SimClient<P>, from = 0): void {
@@ -106,21 +141,24 @@ export class SimServer<P> {
     stream.next_to_send = Math.max(stream.next_to_send, Math.max(0, from));
     stream.watching = true;
     this.drain(room, client, stream);
+    client.schedule_delivery(this.checkpoint_event(room));
   }
 
   receive_post(
     room: string,
     name: string,
     data: P,
-    client_time: number
+    client_time: number,
+    check: SimCheck | null = null
   ): void {
     const posts = this.posts_by_room.get(room) ?? [];
     const post: SimPost<P> = {
-      room,
       index: posts.length,
       server_time: this.scheduler.now,
-      client_time,
+      // The real server clamps client_time to its own monotone clock.
+      client_time: Math.min(client_time, this.scheduler.now),
       name,
+      check,
       data,
     };
     posts.push(post);
@@ -154,15 +192,10 @@ export class SimServer<P> {
     return stream;
   }
 
-  private drain(
-    room: string,
-    client: SimClient<P>,
-    stream: StreamState
-  ): void {
+  private drain(room: string, client: SimClient<P>, stream: StreamState): void {
     const posts = this.get_posts(room);
-    const limit = posts.length;
-    while (stream.next_to_send < limit) {
-      client.schedule_delivery(posts[stream.next_to_send]);
+    while (stream.next_to_send < posts.length) {
+      client.schedule_delivery({ $: "post", post: posts[stream.next_to_send] });
       stream.next_to_send += 1;
     }
   }
@@ -188,10 +221,7 @@ export class SimClient<P> {
   id: string;
   profile: ClientProfile;
   network: SimNetwork<P>;
-  handlers: Map<string, WatchHandler<P>>;
-  latest_post_index_listeners: Array<
-    (info: { room: string; latest_index: number; server_time: number }) => void
-  >;
+  handlers: Map<string, EventHandler<P>>;
   last_ping: number;
   private seq = 0;
   private uplink_ready_at = 0;
@@ -202,7 +232,6 @@ export class SimClient<P> {
     this.profile = profile;
     this.network = network;
     this.handlers = new Map();
-    this.latest_post_index_listeners = [];
     this.last_ping = Infinity;
   }
 
@@ -220,7 +249,7 @@ export class SimClient<P> {
     return this.last_ping;
   }
 
-  post(room: string, data: P, _packed: any): string {
+  post(room: string, data: P, _packed: any, check: SimCheck | null = null): string {
     const name = `${this.id}-${this.seq++}`;
     const client_time = this.server_time();
     const uplink = this.sample_one_way(this.profile.uplink_ms);
@@ -229,72 +258,55 @@ export class SimClient<P> {
     const arrival_at = Math.max(send_at, this.uplink_ready_at);
     this.uplink_ready_at = arrival_at;
     this.network.scheduler.schedule_at(arrival_at, () => {
-      this.network.server.receive_post(room, name, data, client_time);
+      this.network.server.receive_post(room, name, data, client_time, check);
     });
     return name;
   }
 
-  watch(room: string, _packed: any, handler?: WatchHandler<P>): void {
+  watch(room: string, _packed: any, handler?: EventHandler<P>): void {
     if (handler) {
       this.handlers.set(room, handler);
     }
     this.network.server.watch(room, this);
   }
 
-  get_latest_post_index(room: string): void {
-    const one_way = this.sample_one_way(this.profile.downlink_ms);
-    const deliver_at = Math.max(
-      this.network.scheduler.now + one_way,
-      this.downlink_ready_at
-    );
-    this.downlink_ready_at = deliver_at;
-    this.network.scheduler.schedule_at(deliver_at, () => {
-      const latest_index = this.network.server.get_posts(room).length - 1;
-      const info = {
-        room,
-        latest_index,
-        server_time: this.network.scheduler.now,
-      };
-      for (const listener of this.latest_post_index_listeners) {
-        listener(info);
-      }
-    });
-  }
+  close(): void {}
 
-  on_latest_post_index(
-    callback: (info: { room: string; latest_index: number; server_time: number }) => void
-  ): void {
-    this.latest_post_index_listeners.push(callback);
-  }
-
-  schedule_delivery(post: SimPost<P>): void {
+  // Deliver an event over the FIFO downlink (posts and checkpoints share the
+  // same ordered stream, like a real TCP connection).
+  schedule_delivery(event: SimEvent<P>): void {
     const delay = this.sample_one_way(this.profile.downlink_ms);
     const send_at = this.network.scheduler.now + delay;
     const deliver_at = Math.max(send_at, this.downlink_ready_at);
     this.downlink_ready_at = deliver_at;
     this.network.scheduler.schedule_at(deliver_at, () => {
-      const handler = this.handlers.get(post.room);
-      if (handler) {
-        handler(post);
-      }
+      this.deliver(event);
     });
 
     const dup_rate = this.profile.duplicate_rate ?? 0;
-    if (dup_rate <= 0) {
-      return;
-    }
-    if (this.network.rng() > dup_rate) {
+    if (dup_rate <= 0 || this.network.rng() > dup_rate) {
       return;
     }
     const range = this.profile.duplicate_delay_ms ?? { min: 10, max: 200 };
     const extra = rand_between(this.network.rng, range.min, range.max);
     const dup_at = deliver_at + Math.max(0, Math.floor(extra));
     this.network.scheduler.schedule_at(dup_at, () => {
-      const handler = this.handlers.get(post.room);
-      if (handler) {
-        handler(post);
-      }
+      this.deliver(event);
     });
+  }
+
+  private deliver(event: SimEvent<P>): void {
+    const room = this.room_of(event);
+    const handler = room !== null ? this.handlers.get(room) : null;
+    if (handler) {
+      handler(event);
+    }
+  }
+
+  private room_of(_event: SimEvent<P>): string | null {
+    // Single-room tests: deliver to the only registered handler.
+    const first = this.handlers.keys().next();
+    return first.done ? null : first.value;
   }
 
   private sample_jitter(): number {

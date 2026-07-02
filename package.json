@@ -1,6 +1,6 @@
 {
   "name": "vibinet",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Deterministic input-synced netcode engine for real-time games.",
   "type": "module",
   "main": "./dist/index.js",

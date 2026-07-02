@@ -2,25 +2,27 @@
 //
 // Network protocol for VibiNet, encoded via packer.ts.
 // Each WebSocket frame is a packed Union with one of these variants:
-// - get_time: { nonce }
-// - info_time: { nonce, time }
-// - post: { room, time, name, payload }
-// - info_post: { room, index, server_time, client_time, name, payload }
-// - watch: { room, from }
-// - unwatch: { room }
-// - get_latest_post_index: { room }
-// - info_latest_post_index: { room, latest_index, server_time }
+// - get_time: { nonce }                        client -> server
+// - info_time: { nonce, time }                 server -> client
+// - post: { room, time, name, check, payload } client -> server
+// - info_post: { room, index, server_time, client_time, name, check, payload }
+// - watch: { room, from }                      client -> server
+// - unwatch: { room }                          client -> server
+// - checkpoint: { room, latest_index, server_time }  server -> client
 //
-// The protocol reuses packer for all fields. Payload bytes are encoded
-// as a List of UInt8, so we convert Uint8Array <-> number[] at the edge.
-// Times are stored as UInt(53) to stay within JS safe integers.
+// `check` is an optional (tick, hash) checksum of the sender's finalized
+// state, used for desync detection. Payload bytes are encoded as a List of
+// UInt8, so we convert Uint8Array <-> number[] at the edge. Times are
+// UInt(53) to stay within JS safe integers.
 
 import { decode, encode, Packed } from "./packer.ts";
+
+export type WireCheck = { $: "none" } | { $: "some"; tick: number; hash: number };
 
 type WireMessage =
   | { $: "get_time"; nonce: number }
   | { $: "info_time"; nonce: number; time: number }
-  | { $: "post"; room: string; time: number; name: string; payload: number[] }
+  | { $: "post"; room: string; time: number; name: string; check: WireCheck; payload: number[] }
   | {
       $: "info_post";
       room: string;
@@ -28,22 +30,17 @@ type WireMessage =
       server_time: number;
       client_time: number;
       name: string;
+      check: WireCheck;
       payload: number[];
     }
   | { $: "watch"; room: string; from: number }
   | { $: "unwatch"; room: string }
-  | { $: "get_latest_post_index"; room: string }
-  | {
-      $: "info_latest_post_index";
-      room: string;
-      latest_index: number;
-      server_time: number;
-    };
+  | { $: "checkpoint"; room: string; latest_index: number; server_time: number };
 
 export type Message =
   | { $: "get_time"; nonce: number }
   | { $: "info_time"; nonce: number; time: number }
-  | { $: "post"; room: string; time: number; name: string; payload: Uint8Array }
+  | { $: "post"; room: string; time: number; name: string; check: WireCheck; payload: Uint8Array }
   | {
       $: "info_post";
       room: string;
@@ -51,20 +48,29 @@ export type Message =
       server_time: number;
       client_time: number;
       name: string;
+      check: WireCheck;
       payload: Uint8Array;
     }
   | { $: "watch"; room: string; from: number }
   | { $: "unwatch"; room: string }
-  | { $: "get_latest_post_index"; room: string }
-  | {
-      $: "info_latest_post_index";
-      room: string;
-      latest_index: number;
-      server_time: number;
-    };
+  | { $: "checkpoint"; room: string; latest_index: number; server_time: number };
 
 const TIME_BITS = 53;
 const BYTE_LIST_PACKED: Packed = { $: "List", type: { $: "UInt", size: 8 } };
+
+const CHECK_PACKED: Packed = {
+  $: "Union",
+  variants: {
+    none: { $: "Struct", fields: {} },
+    some: {
+      $: "Struct",
+      fields: {
+        tick: { $: "UInt", size: 48 },
+        hash: { $: "UInt", size: 32 },
+      },
+    },
+  },
+};
 
 const MESSAGE_PACKED: Packed = {
   $: "Union",
@@ -88,6 +94,7 @@ const MESSAGE_PACKED: Packed = {
         room: { $: "String" },
         time: { $: "UInt", size: TIME_BITS },
         name: { $: "String" },
+        check: CHECK_PACKED,
         payload: BYTE_LIST_PACKED,
       },
     },
@@ -99,6 +106,7 @@ const MESSAGE_PACKED: Packed = {
         server_time: { $: "UInt", size: TIME_BITS },
         client_time: { $: "UInt", size: TIME_BITS },
         name: { $: "String" },
+        check: CHECK_PACKED,
         payload: BYTE_LIST_PACKED,
       },
     },
@@ -115,13 +123,7 @@ const MESSAGE_PACKED: Packed = {
         room: { $: "String" },
       },
     },
-    get_latest_post_index: {
-      $: "Struct",
-      fields: {
-        room: { $: "String" },
-      },
-    },
-    info_latest_post_index: {
+    checkpoint: {
       $: "Struct",
       fields: {
         room: { $: "String" },
@@ -151,50 +153,22 @@ function list_to_bytes(list: number[]): Uint8Array {
 function to_wire_message(message: Message): WireMessage {
   switch (message.$) {
     case "post":
-      return {
-        $: "post",
-        room: message.room,
-        time: message.time,
-        name: message.name,
-        payload: bytes_to_list(message.payload),
-      };
+      return { ...message, payload: bytes_to_list(message.payload) };
     case "info_post":
-      return {
-        $: "info_post",
-        room: message.room,
-        index: message.index,
-        server_time: message.server_time,
-        client_time: message.client_time,
-        name: message.name,
-        payload: bytes_to_list(message.payload),
-      };
+      return { ...message, payload: bytes_to_list(message.payload) };
     default:
-      return message as WireMessage;
+      return message;
   }
 }
 
 function from_wire_message(message: WireMessage): Message {
   switch (message.$) {
     case "post":
-      return {
-        $: "post",
-        room: message.room,
-        time: message.time,
-        name: message.name,
-        payload: list_to_bytes(message.payload),
-      };
+      return { ...message, payload: list_to_bytes(message.payload) };
     case "info_post":
-      return {
-        $: "info_post",
-        room: message.room,
-        index: message.index,
-        server_time: message.server_time,
-        client_time: message.client_time,
-        name: message.name,
-        payload: list_to_bytes(message.payload),
-      };
+      return { ...message, payload: list_to_bytes(message.payload) };
     default:
-      return message as Message;
+      return message;
   }
 }
 

@@ -197,12 +197,14 @@ const game = new VibiNet.game<State, Post>({
   tick_rate: TICK_RATE,
   tolerance: TOLERANCE,
   smooth,
+  on_desync: (info) => {
+    alert(`Desync detected at tick ${info.tick}! See console for details.`);
+  },
 });
 
 declare global {
   interface Window {
-    DEBUG_DUMP: () => VibiNet.DebugDump<State, Post>;
-    RECOMPUTE: (at_tick?: number) => VibiNet.RecomputeDump<State>;
+    DEBUG_DUMP: () => unknown;
   }
 }
 
@@ -212,13 +214,7 @@ window.DEBUG_DUMP = () => {
   return dump;
 };
 
-window.RECOMPUTE = (at_tick?: number) => {
-  const result = game.debug_recompute(at_tick);
-  console.log("[VIBI] RECOMPUTE", result);
-  return result;
-};
-
-console.log("[VIBI] DEBUG_DUMP() and RECOMPUTE() are available in the console.");
+console.log("[VIBI] DEBUG_DUMP() is available in the console.");
 
 document.title = `Walkers ${pkg.version}`;
 

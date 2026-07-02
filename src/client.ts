@@ -1,15 +1,18 @@
 import { decode, encode, Packed } from "./packer.ts";
 import { decode_message, encode_message } from "./protocol.ts";
 import { OFFICIAL_SERVER_URL, normalize_ws_url } from "./server_url.ts";
+import type { Check, RemotePost } from "./engine.ts";
+
+// Everything a watched room delivers: authoritative posts and server
+// checkpoints ("stream is complete through latest_index as of server_time").
+export type NetEvent<P> =
+  | { $: "post"; post: RemotePost<P> }
+  | { $: "checkpoint"; latest_index: number; server_time: number };
 
 export type ClientApi<P> = {
   on_sync: (callback: () => void) => void;
-  watch: (room: string, packer: Packed, handler?: (post: any) => void) => void;
-  get_latest_post_index?: (room: string) => void;
-  on_latest_post_index?: (
-    callback: (info: { room: string; latest_index: number; server_time: number }) => void
-  ) => void;
-  post: (room: string, data: P, packer: Packed) => string;
+  watch: (room: string, packer: Packed, handler?: (event: NetEvent<P>) => void) => void;
+  post: (room: string, data: P, packer: Packed, check?: Check | null) => string;
   server_time: () => number;
   ping: () => number;
   close: () => void;
@@ -25,8 +28,8 @@ type TimeSync = {
   avg_ping: number;
 };
 
-type MessageHandler = (message: any) => void;
-type RoomWatcher = { handler?: MessageHandler; packer: Packed };
+type EventHandler = (event: NetEvent<any>) => void;
+type RoomWatcher = { handler?: EventHandler; packer: Packed };
 
 // Monotonic local clock. Wall clocks (Date.now) can step backwards or jump
 // on NTP adjustments and sleep/wake, which would poison the clock offset.
@@ -75,9 +78,6 @@ export function create_client<P>(server?: string): ClientApi<P> {
   // Next contiguous index expected per room; on reconnect we re-watch from
   // here so the server only re-sends what we haven't seen.
   const room_cursors = new Map<string, number>();
-  const latest_post_index_listeners: Array<
-    (info: { room: string; latest_index: number; server_time: number }) => void
-  > = [];
   let is_synced = false;
   const sync_listeners: Array<() => void> = [];
   let heartbeat_id: ReturnType<typeof setInterval> | null = null;
@@ -178,7 +178,7 @@ export function create_client<P>(server?: string): ClientApi<P> {
     connect();
   }
 
-  function register_handler(room: string, packer: Packed, handler?: MessageHandler): void {
+  function register_handler(room: string, packer: Packed, handler?: EventHandler): void {
     const existing = room_watchers.get(room);
     if (existing) {
       if (existing.packer !== packer) {
@@ -282,22 +282,28 @@ export function create_client<P>(server?: string): ClientApi<P> {
           const watcher = room_watchers.get(msg.room);
           if (watcher && watcher.handler) {
             const data = decode(watcher.packer, msg.payload);
+            const check = msg.check.$ === "some"
+              ? { tick: msg.check.tick, hash: msg.check.hash }
+              : null;
             watcher.handler({
-              $: "info_post",
-              room: msg.room,
-              index: msg.index,
-              server_time: msg.server_time,
-              client_time: msg.client_time,
-              name: msg.name,
-              data,
+              $: "post",
+              post: {
+                index: msg.index,
+                server_time: msg.server_time,
+                client_time: msg.client_time,
+                name: msg.name,
+                check,
+                data,
+              },
             });
           }
           break;
         }
-        case "info_latest_post_index": {
-          for (const cb of latest_post_index_listeners) {
-            cb({
-              room: msg.room,
+        case "checkpoint": {
+          const watcher = room_watchers.get(msg.room);
+          if (watcher && watcher.handler) {
+            watcher.handler({
+              $: "checkpoint",
               latest_index: msg.latest_index,
               server_time: msg.server_time,
             });
@@ -340,16 +346,17 @@ export function create_client<P>(server?: string): ClientApi<P> {
       watched_rooms.add(room);
       send_or_reconnect(watch_message(room));
     },
-    get_latest_post_index: (room) => {
-      send_or_reconnect(encode_message({ $: "get_latest_post_index", room }));
-    },
-    on_latest_post_index: (callback) => {
-      latest_post_index_listeners.push(callback);
-    },
-    post: (room, data, packer) => {
+    post: (room, data, packer, check) => {
       const name = gen_name();
       const payload = encode(packer, data);
-      const message = encode_message({ $: "post", room, time: server_time(), name, payload });
+      const message = encode_message({
+        $: "post",
+        room,
+        time: server_time(),
+        name,
+        check: check ? { $: "some", tick: check.tick, hash: check.hash } : { $: "none" },
+        payload,
+      });
       if (pending_posts.length > 0) {
         flush_pending_posts_if_open();
       }
@@ -390,8 +397,6 @@ export function create_client<P>(server?: string): ClientApi<P> {
       watched_rooms: Array.from(watched_rooms.values()),
       room_cursors: Object.fromEntries(room_cursors.entries()),
       room_watchers: Array.from(room_watchers.keys()),
-      room_watcher_count: room_watchers.size,
-      latest_post_index_listener_count: latest_post_index_listeners.length,
       sync_listener_count: sync_listeners.length,
       time_sync: {
         clock_offset: time_sync.clock_offset,

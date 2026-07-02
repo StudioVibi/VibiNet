@@ -7,8 +7,10 @@
 // - db/<room>.idx : u64 offsets into .dat (one per post)
 //
 // Record format (inside .dat):
-//   [u32 record_len][u64 server_time][u64 client_time][string name][bytes payload]
+//   [u32 record_len][u64 server_time][u64 client_time]
+//   [u64 check_tick][u32 check_hash][string name][bytes payload]
 //
+// check_tick 0 means "no checksum" (tick 0 predates any real room).
 // Strings are UTF-8 with a u32 length prefix. Payload bytes are length-prefixed.
 
 import {
@@ -27,6 +29,8 @@ import { BinaryReader, BinaryWriter, utf8_bytes } from "./binary.ts";
 export type StoredPost = {
   server_time: number;
   client_time: number;
+  check_tick: number;
+  check_hash: number;
   name: string;
   payload: Uint8Array;
 };
@@ -59,10 +63,12 @@ export function ensure_db_dir(): void {
 function encode_record(post: StoredPost): Uint8Array {
   const name_bytes = utf8_bytes(post.name);
   const payload = post.payload;
-  const size = 8 + 8 + 4 + name_bytes.length + 4 + payload.length;
+  const size = 8 + 8 + 8 + 4 + 4 + name_bytes.length + 4 + payload.length;
   const writer = new BinaryWriter(size);
   writer.write_u64(post.server_time);
   writer.write_u64(post.client_time);
+  writer.write_u64(post.check_tick);
+  writer.write_u32(post.check_hash);
   writer.write_string_bytes(name_bytes);
   writer.write_bytes(payload);
   return writer.finish();
@@ -72,9 +78,11 @@ function decode_record(buf: Uint8Array): StoredPost {
   const reader = new BinaryReader(buf);
   const server_time = reader.read_u64();
   const client_time = reader.read_u64();
+  const check_tick = reader.read_u64();
+  const check_hash = reader.read_u32();
   const name = reader.read_string();
   const payload = reader.read_bytes();
-  return { server_time, client_time, name, payload };
+  return { server_time, client_time, check_tick, check_hash, name, payload };
 }
 
 function load_offsets(idx_path: string): number[] {

@@ -9,10 +9,14 @@ Clients replay the same input stream and compute the same game state.
 
 ### Core runtime
 
-- `src/vibi.ts`: deterministic replay engine.
+- `src/engine.ts`: PURE deterministic replay core (no IO, no mutation).
+  Finalization model: one base state + small pending window; checksums.
+- `src/vibi.ts`: thin stateful shell (`VibiNet.game`) around the engine:
+  owns the client, feeds engine events, memoizes computed states.
 - `src/client.ts`: WebSocket client, room ops, and time sync.
 - `src/index.ts`: public package exports.
-- `test/desync_regression.test.ts`: regression tests for desync root cause.
+- `test/engine.test.ts`: pure-core property tests (order invariance,
+  finalization equivalence, prediction, checksums, non-mutation).
 
 ### Protocol and encoding
 
@@ -24,6 +28,9 @@ Clients replay the same input stream and compute the same game state.
   accepted (stale replies would poison the clock offset).
 - `watch` carries a `from` index; there is no separate `load` message. The
   client tracks a per-room cursor and re-watches from it on reconnect.
+- The server pushes `checkpoint` messages (per watch + every CHECKPOINT_MS);
+  clients never poll. Posts carry an optional (tick, hash) checksum of the
+  sender's finalized state for desync detection.
 
 ### Server side
 
@@ -38,13 +45,16 @@ Clients replay the same input stream and compute the same game state.
 
 ### Replay safety model
 
-- Client tracks `no_pending_posts_before_ms` in `src/vibi.ts`.
-- The contiguous frontier advances by `server_time - tolerance` (NOT
-  `official_time`, which is not monotone in index).
-- `compute_state_at` is clamped so pruning never crosses unknown history.
-- If a post arrives before the cache window, cache is invalidated loudly;
-  posts are not silently dropped.
-- `compute_state_at` results are memoized per (tick, timeline_version).
+- `frontier_ms` in `src/engine.ts` is the proven bound: no unseen post can
+  land before it. It advances by `server_time - tolerance` of contiguous
+  posts and checkpoints (NOT by `official_time`, which is not monotone in
+  index).
+- Ticks below the frontier are folded into `base_state` and discarded; a
+  post below base is impossible by construction (monotone server time,
+  contiguous delivery, tolerance clamp on both sides).
+- `state_at(tick)` answers any tick >= base; earlier ticks clamp to base.
+- The shell memoizes computed states and invalidates them from the arriving
+  post's tick onward.
 
 ### Demo app
 

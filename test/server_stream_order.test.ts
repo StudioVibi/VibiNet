@@ -35,8 +35,10 @@ test("server stream is contiguous and gapless per client", () => {
 
   const received_indices: number[] = [];
 
-  client.watch(ROOM, null, (post) => {
-    received_indices.push(post.index);
+  client.watch(ROOM, null, (event) => {
+    if (event.$ === "post") {
+      received_indices.push(event.post.index);
+    }
   });
 
   network.scheduler.run_until(network.scheduler.now + 500);

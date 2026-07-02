@@ -104,6 +104,29 @@ const ws_heartbeat_interval_id = setInterval(() => {
   }
 }, 30000);
 
+function checkpoint_message(room: string): Uint8Array {
+  return encode_message({
+    $: "checkpoint",
+    room,
+    latest_index: get_post_count(room) - 1,
+    server_time: now(),
+  });
+}
+
+// Periodically prove stream completeness to watchers so client-side
+// finalization keeps advancing even in quiet rooms.
+const CHECKPOINT_MS = Number(process.env.CHECKPOINT_MS ?? 1000);
+const checkpoint_interval_id = setInterval(() => {
+  for (const [room, room_watchers] of watchers.entries()) {
+    const message = checkpoint_message(room);
+    for (const ws of room_watchers) {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(message);
+      }
+    }
+  }
+}, CHECKPOINT_MS);
+
 ensure_db_dir();
 
 function as_uint8_array(data: unknown): Uint8Array {
@@ -195,6 +218,9 @@ function drain_room(ws: WebSocket, room: string, state: RoomStreamState): void {
             server_time: post.server_time,
             client_time: post.client_time,
             name: post.name,
+            check: post.check_tick > 0
+              ? { $: "some", tick: post.check_tick, hash: post.check_hash }
+              : { $: "none" },
             payload: post.payload,
           })
         );
@@ -239,9 +265,12 @@ wss.on("connection", (ws) => {
         const name = message.name;
         const payload = message.payload;
 
+        const check = message.check;
         const index = append_post(room, {
           server_time,
           client_time,
+          check_tick: check.$ === "some" ? check.tick : 0,
+          check_hash: check.$ === "some" ? check.hash : 0,
           name,
           payload,
         });
@@ -264,6 +293,10 @@ wss.on("connection", (ws) => {
         stream.watching = true;
         add_watcher(ws, room);
         drain_room(ws, room, stream);
+        // Immediate checkpoint so a fresh watcher can finalize right away.
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(checkpoint_message(room));
+        }
         break;
       }
       case "unwatch": {
@@ -271,18 +304,6 @@ wss.on("connection", (ws) => {
         const stream = get_room_stream_state(ws, room);
         stream.watching = false;
         remove_watcher(ws, room);
-        break;
-      }
-      case "get_latest_post_index": {
-        const room = message.room;
-        ws.send(
-          encode_message({
-            $: "info_latest_post_index",
-            room,
-            latest_index: get_post_count(room) - 1,
-            server_time: now(),
-          })
-        );
         break;
       }
     }
@@ -305,6 +326,7 @@ wss.on("connection", (ws) => {
 
 server.on("close", () => {
   clearInterval(ws_heartbeat_interval_id);
+  clearInterval(checkpoint_interval_id);
 });
 
 server.listen(port, host, () => {

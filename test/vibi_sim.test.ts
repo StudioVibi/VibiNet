@@ -1,3 +1,6 @@
+// Full-stack simulation: real VibiNet instances over the simulated network,
+// checked against a from-scratch reference fold of the server's post log.
+
 import { test, expect } from "bun:test";
 import {
   create_rng,
@@ -5,6 +8,8 @@ import {
   rand_int,
   ClientProfile,
   SimClient,
+  SimCheck,
+  SimEvent,
   SimNetwork,
   SimPost,
 } from "./sim_network.ts";
@@ -39,7 +44,7 @@ function time_to_tick(ms: number): number {
   return Math.floor((ms * TICK_RATE) / 1000);
 }
 
-function official_time(post: SimPost<Post>): number {
+function official_time(post: { server_time: number; client_time: number }): number {
   const limit = post.server_time - TOLERANCE;
   if (post.client_time <= limit) {
     return limit;
@@ -47,82 +52,68 @@ function official_time(post: SimPost<Post>): number {
   return post.client_time;
 }
 
-function official_tick(post: SimPost<Post>): number {
+function official_tick(post: { server_time: number; client_time: number }): number {
   return time_to_tick(official_time(post));
 }
 
-type TimelineBucket = {
-  remote: SimPost<Post>[];
-  local: SimPost<Post>[];
-};
+type LocalRef = { client_time: number; data: Post };
 
+// Reference: fold every known post from scratch (posts landing before the
+// room anchor clamp to it, like the engine).
 function compute_reference_state(
   remote_posts: SimPost<Post>[],
-  local_posts: SimPost<Post>[],
-  at_tick: number,
-  include_local: boolean
+  local_posts: LocalRef[],
+  at_tick: number
 ): State {
-  const timeline = new Map<number, TimelineBucket>();
   const seen = new Set<number>();
-  let index0: SimPost<Post> | null = null;
-
+  let anchor: SimPost<Post> | null = null;
+  const deduped: SimPost<Post>[] = [];
   for (const post of remote_posts) {
     if (seen.has(post.index)) {
       continue;
     }
     seen.add(post.index);
+    deduped.push(post);
     if (post.index === 0) {
-      index0 = post;
+      anchor = post;
     }
-    const tick = official_tick(post);
-    let bucket = timeline.get(tick);
-    if (!bucket) {
-      bucket = { remote: [], local: [] };
-      timeline.set(tick, bucket);
-    }
-    bucket.remote.push(post);
   }
-
-  if (!index0) {
+  if (!anchor) {
     return initial;
   }
-  const initial_tick = official_tick(index0);
+  const initial_tick = official_tick(anchor);
   if (at_tick < initial_tick) {
     return initial;
   }
 
-  if (include_local) {
-    for (const post of local_posts) {
-      const tick = official_tick(post);
-      let bucket = timeline.get(tick);
-      if (!bucket) {
-        bucket = { remote: [], local: [] };
-        timeline.set(tick, bucket);
-      }
-      bucket.local.push(post);
-    }
+  const remote_buckets = new Map<number, SimPost<Post>[]>();
+  for (const post of deduped) {
+    const tick = Math.max(official_tick(post), initial_tick);
+    const bucket = remote_buckets.get(tick) ?? [];
+    bucket.push(post);
+    remote_buckets.set(tick, bucket);
   }
-
-  for (const bucket of timeline.values()) {
-    bucket.remote.sort((a, b) => a.index - b.index);
+  for (const bucket of remote_buckets.values()) {
+    bucket.sort((a, b) => a.index - b.index);
+  }
+  const local_buckets = new Map<number, LocalRef[]>();
+  for (const local of local_posts) {
+    const tick = Math.max(time_to_tick(local.client_time), initial_tick);
+    const bucket = local_buckets.get(tick) ?? [];
+    bucket.push(local);
+    local_buckets.set(tick, bucket);
   }
 
   let state = initial;
   for (let tick = initial_tick; tick <= at_tick; tick++) {
     state = on_tick(state);
-    const bucket = timeline.get(tick);
-    if (bucket) {
-      for (const post of bucket.remote) {
-        state = on_post(post.data, state);
-      }
-      if (include_local) {
-        for (const post of bucket.local) {
-          state = on_post(post.data, state);
-        }
-      }
+    for (const post of remote_buckets.get(tick) ?? []) {
+      state = on_post(post.data, state);
+    }
+    for (const local of local_buckets.get(tick) ?? []) {
+      state = on_post(local.data, state);
     }
   }
-
   return state;
 }
 
@@ -148,6 +139,7 @@ function max_delivery_ms(profiles: ClientProfile[]): number {
   return max_uplink + max_downlink + (2 * max_jitter);
 }
 
+// Wrap a SimClient in the ClientApi shape, recording delivered posts.
 function create_recording_client(client: SimClient<Post>) {
   const received: SimPost<Post>[] = [];
   return {
@@ -156,20 +148,19 @@ function create_recording_client(client: SimClient<Post>) {
     watch: (
       room: string,
       packed: any,
-      handler?: (post: SimPost<Post>) => void
+      handler?: (event: SimEvent<Post>) => void
     ) => {
-      client.watch(room, packed, (post) => {
-        received.push(post);
+      client.watch(room, packed, (event) => {
+        if (event.$ === "post") {
+          received.push(event.post);
+        }
         if (handler) {
-          handler(post);
+          handler(event);
         }
       });
     },
-    get_latest_post_index: (room: string) => client.get_latest_post_index(room),
-    on_latest_post_index: (
-      callback: (info: { room: string; latest_index: number; server_time: number }) => void
-    ) => client.on_latest_post_index(callback),
-    post: (room: string, data: Post, packed: any) => client.post(room, data, packed),
+    post: (room: string, data: Post, packed: any, check?: SimCheck | null) =>
+      client.post(room, data, packed, check ?? null),
     server_time: () => client.server_time(),
     ping: () => client.ping(),
     close: () => {},
@@ -222,71 +213,73 @@ function schedule_inputs(
   scheduler.schedule_at(start_ms, schedule_next);
 }
 
-function local_posts_for(player: PlayerSim): SimPost<Post>[] {
-  const posts = (player.vibi as any).local_posts as Map<
-    string,
-    SimPost<Post>
-  >;
-  return Array.from(posts.values());
+function local_posts_for(player: PlayerSim): LocalRef[] {
+  const out: LocalRef[] = [];
+  for (const local of player.vibi.engine.locals.values()) {
+    out.push({ client_time: local.client_time, data: local.data });
+  }
+  return out;
 }
 
-function reference_render_state(
-  network: SimNetwork<Post>,
-  player: PlayerSim
-): State {
-  const remote_posts = player.received_posts;
-  const local_posts = local_posts_for(player);
+function reference_render_state(player: PlayerSim): State {
   const vibi = player.vibi;
   const curr_tick = vibi.server_tick();
   const tick_ms = 1000 / vibi.tick_rate;
   const tol_ticks = Math.ceil(vibi.tolerance / tick_ms);
   const rtt_ms = vibi.client_api.ping();
-  const half_rtt = isFinite(rtt_ms)
-    ? Math.ceil((rtt_ms / 2) / tick_ms)
-    : 0;
-  const remote_lag = Math.max(tol_ticks, half_rtt + 1);
-  const remote_tick = Math.max(0, curr_tick - remote_lag);
-  const remote_state = compute_reference_state(
-    remote_posts,
-    local_posts,
-    remote_tick,
-    true
-  );
-  const local_state = compute_reference_state(
-    remote_posts,
-    local_posts,
-    curr_tick,
-    true
-  );
+  const half_rtt = isFinite(rtt_ms) ? Math.ceil((rtt_ms / 2) / tick_ms) : 0;
+  const lag = Math.max(tol_ticks, half_rtt + 1);
+  const base = vibi.finalized_tick() ?? 0;
+  const remote_tick = Math.max(base, curr_tick - lag, 0);
+
+  const locals = local_posts_for(player);
+  const remote_state = compute_reference_state(player.received_posts, locals, remote_tick);
+  const local_state = compute_reference_state(player.received_posts, locals, curr_tick);
   return vibi.smooth(remote_state, local_state);
 }
 
+// Every player must agree with a from-scratch fold of the server's log. The
+// probe tick is clamped up to each player's finalized tick (states below it
+// are folded away); posts at or below that tick are guaranteed delivered.
 function assert_authoritative_sync(
   network: SimNetwork<Post>,
   players: PlayerSim[],
   at_tick: number
 ): void {
   const posts = network.server.get_posts(ROOM);
-  const reference = compute_reference_state(posts, [], at_tick, false);
   for (const player of players) {
-    const state = player.vibi.compute_state_at(at_tick);
+    const tick = Math.max(at_tick, player.vibi.finalized_tick() ?? at_tick);
+    const state = player.vibi.compute_state_at(tick);
+    const reference = compute_reference_state(posts, [], tick);
     expect(state).toEqual(reference);
   }
 }
 
-function assert_render_state(
-  network: SimNetwork<Post>,
-  player: PlayerSim
-): void {
-  const expected = reference_render_state(network, player);
+function assert_render_state(player: PlayerSim): void {
+  const expected = reference_render_state(player);
   const rendered = player.vibi.compute_render_state();
   expect(rendered).toEqual(expected);
+}
+
+// All finalized-state checksums must agree across players at common ticks.
+function assert_checksums_agree(players: PlayerSim[]): void {
+  const by_tick = new Map<number, number>();
+  for (const player of players) {
+    expect(player.vibi.desync()).toBeNull();
+    for (const check of player.vibi.engine.checks) {
+      const prev = by_tick.get(check.tick);
+      if (prev !== undefined) {
+        expect(check.hash).toBe(prev);
+      } else {
+        by_tick.set(check.tick, check.hash);
+      }
+    }
+  }
 }
 
 type Scenario = {
   seed: number;
   duration_ms: number;
-  cache_enabled: boolean;
   profiles: ClientProfile[];
   check_interval_ms: number;
   render_check_interval_ms: number;
@@ -323,9 +316,7 @@ function run_scenario(s: Scenario): void {
       tick_rate: TICK_RATE,
       tolerance: TOLERANCE,
       smooth,
-      cache: s.cache_enabled,
-      snapshot_stride: 8,
-      snapshot_count: 256,
+      check_stride: 16,
       client: recording,
     });
     const sync_at = s.profiles[i].sync_delay_ms ?? 0;
@@ -388,7 +379,7 @@ function run_scenario(s: Scenario): void {
     }
     const ready_players = players.filter((p) => now >= p.ready_at);
     for (const player of ready_players) {
-      assert_render_state(network, player);
+      assert_render_state(player);
     }
     network.scheduler.schedule(
       s.render_check_interval_ms,
@@ -410,8 +401,9 @@ function run_scenario(s: Scenario): void {
       assert_authoritative_sync(network, ready_players, final_tick);
     }
     for (const player of ready_players) {
-      assert_render_state(network, player);
+      assert_render_state(player);
     }
+    assert_checksums_agree(ready_players);
   }
 }
 
@@ -422,22 +414,10 @@ const BASE_PROFILES: ClientProfile[] = [
   { uplink_ms: 120, downlink_ms: 140, jitter_ms: 45, clock_offset_ms: -20 },
 ];
 
-test("walkers stays in sync under mixed latency (cache on)", () => {
+test("walkers stays in sync under mixed latency", () => {
   run_scenario({
     seed: 123,
     duration_ms: 120_000,
-    cache_enabled: true,
-    profiles: BASE_PROFILES,
-    check_interval_ms: 500,
-    render_check_interval_ms: 800,
-  });
-});
-
-test("walkers stays in sync under mixed latency (cache off)", () => {
-  run_scenario({
-    seed: 321,
-    duration_ms: 60_000,
-    cache_enabled: false,
     profiles: BASE_PROFILES,
     check_interval_ms: 500,
     render_check_interval_ms: 800,
@@ -454,7 +434,6 @@ test("walkers stays in sync under heavy jitter", () => {
   run_scenario({
     seed: 999,
     duration_ms: 90_000,
-    cache_enabled: true,
     profiles: jitter_profiles,
     check_interval_ms: 400,
     render_check_interval_ms: 650,
@@ -489,7 +468,6 @@ test("late joiners with asymmetric links stay in sync", () => {
   run_scenario({
     seed: 2024,
     duration_ms: 150_000,
-    cache_enabled: true,
     profiles: late_profiles,
     check_interval_ms: 600,
     render_check_interval_ms: 900,
@@ -507,7 +485,6 @@ test("burst inputs stay in sync", () => {
   run_scenario({
     seed: 777,
     duration_ms: 80_000,
-    cache_enabled: true,
     profiles: BASE_PROFILES,
     check_interval_ms: 400,
     render_check_interval_ms: 700,
@@ -515,11 +492,10 @@ test("burst inputs stay in sync", () => {
   });
 });
 
-test("long run keeps cache window correct", () => {
+test("long run stays in sync and checksums agree", () => {
   run_scenario({
     seed: 4242,
     duration_ms: 300_000,
-    cache_enabled: true,
     profiles: BASE_PROFILES,
     check_interval_ms: 1000,
     render_check_interval_ms: 1500,
@@ -564,7 +540,6 @@ test("duplicate deliveries stay in sync", () => {
   run_scenario({
     seed: 5555,
     duration_ms: 100_000,
-    cache_enabled: true,
     profiles: dup_profiles,
     check_interval_ms: 600,
     render_check_interval_ms: 900,
