@@ -37,7 +37,7 @@ type PlayerSim = {
   keys: Record<"w" | "a" | "s" | "d", boolean>;
 };
 
-const ROOM = "sim-room";
+const ROOM = "SimRoom#0001";
 const KEY_LIST: Array<"w" | "a" | "s" | "d"> = ["w", "a", "s", "d"];
 
 function time_to_tick(ms: number): number {

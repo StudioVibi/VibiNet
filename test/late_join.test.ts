@@ -17,7 +17,7 @@ import {
 
 const { VibiNet } = await import("../src/client.ts");
 
-const ROOM = "late-join-room";
+const ROOM = "LateJoin#0001";
 const PROFILE = {
   uplink_ms: 5,
   downlink_ms: 40,

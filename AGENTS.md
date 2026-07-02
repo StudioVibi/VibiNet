@@ -9,15 +9,17 @@ Clients replay the same input stream and compute the same game state.
 
 ### File layout (exactly 3 source files, split by purity + platform)
 
-- `src/vibinet.ts`: ALL pure code, zero platform deps. One Types section up
+- `src/vibinet.ts`: ALL pure zero-dependency code. One Types section up
   top, then one section per type: Writer/Reader (bit cursors), Packed (bit
-  packer), Check, Message (wire codec), Time, Post, State, Engine (replay
-  core: finalization model, one base state + small pending window,
-  checksums).
-- `src/client.ts`: the impure client side and package entry point. WebSocket
+  packer), Nick (64-bit room ids and their text form), Check, Message (wire
+  codec), Time, Post, State, Engine (replay core: finalization model, one
+  base state + small pending window, checksums).
+- `src/client.ts`: the client side and package entry point. WebSocket
   transport (`client_new`: reconnect, time sync, post queue) + the stateful
-  `VibiNet.game` shell (owns transport, engine value, state memos).
-  Re-exports everything from vibinet.ts.
+  `VibiNet.game` shell (owns transport, engine value, state memos) + the
+  identity layer (User/Addr/Sig/Chain/Auth/Claim sections — pure functions
+  that live here only because they depend on @noble/curves + @noble/hashes;
+  the server is 100% auth-unaware). Re-exports everything from vibinet.ts.
 - `src/server.ts`: the impure server side (entry point: `bun run
   src/server.ts`). Append-only disk storage (Store/Record sections),
   watcher/stream bookkeeping, checkpoints, static HTTP for the demo.
@@ -48,8 +50,26 @@ Clients replay the same input stream and compute the same game state.
 - Server streams room posts with per-connection ordered contiguous cursors.
 - Server time is monotone (post server_time never decreases in index) and
   client_time is clamped to it on ingestion (no future-dated posts).
-- Malformed frames are ignored (never crash); room names are validated
-  against `[A-Za-z0-9_-]{1,64}` before touching storage.
+- Malformed frames are ignored (never crash). Rooms are 64-bit ids (nicks
+  like `JohnBear#15FF` in code/UIs; raw 64 bits on the wire; 16 hex digits
+  as db file names), so no name validation is needed.
+- Payloads that fail to decode client-side still become posts with
+  `data: undefined`: ordered and finalized, never applied. One junk payload
+  must not stall a room's frontier.
+
+### Identity layer (client-side only)
+
+- User = secp256k1 keypair; address = identity; auto-nick = address' last 8
+  bytes (printing only — auth always compares full addresses).
+- Auth rooms (`auth: true`) wrap posts in `Envelope = { auth, body }`:
+  `Join` (one EIP-191 signature anchoring a sha256/16 hash chain, signs the
+  room nick + strictly increasing time) then `Pass` (one 16-byte preimage
+  per post, one sha256 to verify). Server total order makes first-reveal-
+  wins deterministic; theft/replay folds as anonymous.
+- Engine state of auth rooms is `{ auth, game }` (see `auth_config`); posts
+  reach on_post enriched with `$user`/`$nick` (null = anonymous/invalid).
+- Names: signed claims in the claimer's auto-nick room; highest signed time
+  wins; display-only, never game state (`name_set`/`name_get`).
 
 ### Replay safety model
 

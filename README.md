@@ -13,7 +13,9 @@ bounded, and clients cross-check state hashes to detect divergence.
 The library is split by purity: `src/vibinet.ts` is the entire pure core
 (bit packer, wire codec, replay engine) — plain data in, plain data out, no
 IO. `src/client.ts` is the client shell (WebSocket transport + the stateful
-`VibiNet.game` class) and `src/server.ts` is the server entry point.
+`VibiNet.game` class) plus the optional client-side identity layer
+(Ethereum-style users, per-post auth, display names — the server knows
+nothing about any of it), and `src/server.ts` is the server entry point.
 
 Requirements: your logic must be deterministic. Same inputs, same order, same
 result. No `Math.random()`, no `Date.now()`, no reads outside the state, and
@@ -80,7 +82,7 @@ const packer: VibiNet.Packed = {
 // 5. Create the game object.
 const game = new VibiNet.game<State, Post>({
   server: "ws://localhost:8080", // omit for the official server
-  room: "my-room",
+  room: "MyRoom#0001",           // rooms are 64-bit nicks (see Rooms & Nicks)
   initial,
   on_tick,
   on_post,
@@ -114,7 +116,7 @@ your state type, `P` your post type.
 
 | Option            | Type                    | Default            | Meaning |
 |-------------------|-------------------------|--------------------|---------|
-| `room`            | `string`                | required           | Room to join. Must match `[A-Za-z0-9_-]{1,64}`. |
+| `room`            | `string`                | required           | Room to join, as a nick (`"JohnBear#15FF"`, see Rooms & Nicks). |
 | `initial`         | `S`                     | required           | State before the first post. |
 | `on_tick`         | `(s: S) => S`           | required           | Advances the world by one tick. Pure. |
 | `on_post`         | `(p: P, s: S) => S`     | required           | Applies one input. Pure. |
@@ -126,6 +128,8 @@ your state type, `P` your post type.
 | `check_stride`    | `number`                | `64`               | Ticks between finalized-state checksums (desync detection). |
 | `on_desync`       | `(info) => void`        | none               | Called once if a peer's state hash disagrees with ours. |
 | `client`          | `ClientApi<P>`          | real WebSocket     | Injectable transport, for tests/simulation. |
+| `auth`            | `boolean`               | `false`            | Fold the auth envelope (see Identity). Part of the room's protocol: all clients must agree, like `packer`. |
+| `user`            | `User`                  | none               | Identity signing outgoing posts (requires `auth: true`). Absent = post anonymously. |
 
 ### Methods
 
@@ -146,12 +150,12 @@ your state type, `P` your post type.
 | `desync()`                   | `Desync or null` | Non-null if a peer's finalized-state hash disagreed with ours.                                                                         |
 | `close()`                    | `void`           | Unwatches and closes the connection.                                                                                                   |
 | `debug_dump()`               | dump             | Engine + transport introspection.                                                                                                      |
-| `VibiNet.name_gen()`         | `string`         | Static. Random 8-char id (useful for room names).                                                                                      |
+| `VibiNet.nick_gen()`         | `string`         | Static. Random 64-bit nick (fresh room ids: one per match).                                                                            |
 
 ### Other exports
 
 ```ts
-import { VibiNet, client_new, name_gen, OFFICIAL_SERVER_URL } from "vibinet";
+import { VibiNet, client_new, nick_gen, user_init, name_get, OFFICIAL_SERVER_URL } from "vibinet";
 ```
 
 - `client_new(server?)` — the raw WebSocket transport (`ClientApi`), only
@@ -160,9 +164,28 @@ import { VibiNet, client_new, name_gen, OFFICIAL_SERVER_URL } from "vibinet";
   `packed_encode`, `packed_decode`, `message_encode`, `message_decode`, ...).
   Use it directly for headless simulation or property tests; `VibiNet.game`
   is a thin IO shell around it.
+- Nicks: `nick_read`, `nick_show`, `nick_norm`, `nick_link`, `nick_gen`.
+- Identity: `user_new`, `user_init`, `user_load`, `user_save`, `user_addr`,
+  `user_nick`, `addr_nick`, `sig_make`, `sig_addr`, `chain_new`,
+  `chain_pass`, `chain_verify`, `auth_config`, `auth_packed`, `name_set`,
+  `name_get`, `claim_make`, `claim_fold` (see Identity below).
 - `OFFICIAL_SERVER_URL` — `wss://net.studiovibi.com`.
 - Types: `VibiNet.Packed`, `VibiNet.Options<S, P>`, `ClientApi<P>`,
-  `Event<P>`, `Engine<S, P>`, `Config<S, P>`.
+  `Event<P>`, `Engine<S, P>`, `Config<S, P>`, `User`, `Address`, `Auth`,
+  `Envelope<P>`, `Meta`, `Claim`.
+
+## Rooms & Nicks
+
+A room id is 64 bits. Its text form is a **nick**: up to 8 chars in
+`[_a-zA-Z0-9$]` (6 bits each, `_` is the zero digit), then `#`, then 4 hex
+digits — `JohnBear#15FF`. Leading `_` are stripped when printing, so
+`Bob#1234` and `_____Bob#1234` are the same id. In URLs `#` becomes `.`
+(`?room=JohnBear.15FF`); parsing accepts both. The wire and the server's db
+carry only the raw 64 bits — nicks exist in code and UIs.
+
+Rooms have no creation step, no membership, and no server-side meaning:
+posting to a nick brings the room into existence. `nick_gen()` makes a
+fresh random one (e.g. one per match).
 
 ## Time Model
 
@@ -219,6 +242,80 @@ compare against their own hash for that tick; a mismatch calls `on_desync`
 and sets `desync()`. Since finalized state is authoritative-only, matching
 logic always produces matching hashes.
 
+## Identity (client-side auth)
+
+Optional, and invisible to the server: identity is a protocol folded by the
+clients, riding inside ordinary post payloads. A user is an Ethereum-style
+secp256k1 keypair; their address is their identity everywhere, and its last
+8 bytes are their **auto-nick** (`user_nick`) — a printable handle and the
+address of their personal room. Signatures are EIP-191 personal messages,
+so a wallet like MetaMask can replace the local key without protocol
+changes.
+
+```ts
+import { VibiNet, user_init, name_set, name_get } from "vibinet";
+
+const user = user_init(); // localStorage-backed keypair (created on first run)
+
+const game = new VibiNet.game<State, Post>({
+  room: "Match_42#A3F1",
+  auth: true,  // this room folds identities (all clients must agree)
+  user,        // sign my posts (omit to play anonymously)
+  /* ...initial, on_tick, on_post, packer, tick_rate, tolerance... */
+});
+```
+
+With `auth: true`, every post reaching `on_post` carries two extra fields:
+`$user` (the sender's address) and `$nick` (its auto-nick) — or `null` for
+anonymous or invalid posts. What anonymous posts may do is the game's
+choice; most games just ignore them:
+
+```ts
+function on_post(post: Post & { $user?: string | null }, state: State): State {
+  if (post.$user == null) return state; // authenticated players only
+  /* ...use post.$user as the player's id... */
+}
+```
+
+How it works (all pure, all deterministic, ~1µs per post):
+
+- The first post carries a **Join**: one signature binding the sender's
+  address to a fresh hash chain (`head = H^16384(seed)`, 16-byte links,
+  H = sha256 truncated). ~86 bytes, once per ~16k posts.
+- Every later post carries a **Pass**: the next chain preimage. Verifying
+  is one sha256; +16 bytes per post. The server-assigned total order makes
+  "first reveal wins" identical on every client, so a stolen or replayed
+  link hashes against an already-moved head and folds as anonymous.
+- Join replays fail too: each Join signs the room nick (no cross-room
+  replay) and a strictly increasing time (no same-room replay).
+- When a chain runs out, the client re-anchors with a new Join
+  automatically.
+
+Authentication compares full 160-bit addresses, never nicks: nicks are for
+printing. Two users sharing an auto-nick (a 64-bit collision) is harmless.
+
+Threat model: malicious clients (impersonation, theft, replay). The server
+is trusted for ordering — the same trust the rest of VibiNet already places
+in it — and transport runs over TLS.
+
+### Display names
+
+A user's **name** is decoration, not identity: not unique, display-only,
+never part of game state (it lives in a different room, and rooms must stay
+self-contained).
+
+```ts
+await name_set(user, "Johnny_the_Bear");        // sign + publish
+const name = await name_get(address);           // read someone's name
+```
+
+`name_set` posts a signed claim to the user's own auto-nick room — the room
+is the registry. `name_get` folds that room: claims whose signature
+recovers the exact address win by highest signed time (renames work,
+replayed old claims can never win). Names are `[A-Za-z0-9_]{1,32}`. Render
+name + nick together (`Johnny_the_Bear (JohnBear#15FF)`) so a copied name
+never passes as a copied identity.
+
 ## Packed Types
 
 Schemas are values of type `VibiNet.Packed`. Encoding is a compact bitstream:
@@ -236,6 +333,7 @@ no field names, no padding, LSB-first.
 | `{ $: "UInt", size: N }` | number (`bigint` if N > 53) | N bits |
 | `{ $: "Int", size: N }` | number (`bigint` if N > 53) | N bits, two's complement |
 | `{ $: "Nat" }` | number | unary (N+1 bits) — small values only |
+| `{ $: "Hex", size: N }` | string of 2N hex chars (decodes lowercase) | N bytes |
 
 Union notes: tag ids are assigned by *sorting variant names* — renaming a
 variant changes the wire format. For `Struct` variants the object itself is
@@ -252,13 +350,13 @@ bun run src/server.ts                          # 0.0.0.0:8080, also serves walke
 HOST=127.0.0.1 PORT=8080 bun run src/server.ts # behind a reverse proxy
 ```
 
-- Posts persist in `db/<room>.dat` + `db/<room>.idx` (append-only). Delete
-  both files to reset a room.
-- Room names are restricted to `[A-Za-z0-9_-]{1,64}`.
+- Posts persist in `db/<code>.dat` + `db/<code>.idx` (append-only), where
+  `<code>` is the room's 64-bit id as 16 hex digits. Delete both files to
+  reset a room.
 - `CHECKPOINT_MS` (default 1000) sets the checkpoint broadcast period; lower
   values shrink the clients' pending window.
 - Client and server must run the same vibinet version: the wire protocol is
-  not stable across minor versions (0.2.0 changed it).
+  not stable across minor versions (0.4.0 changed it: rooms are 64-bit).
 - Browser pages served over HTTPS must use `wss://` (the client auto-upgrades
   and warns).
 - Deployment/auto-sync helpers live in `scripts/` (see `AGENTS.md`).
@@ -267,4 +365,5 @@ HOST=127.0.0.1 PORT=8080 bun run src/server.ts # behind a reverse proxy
 
 `demo/walkers/` is a complete commented example (players are letters moving with
 WASD): state, posts, packer, smoothing, and browser bootstrap in one file.
-Run `bun run src/server.ts` and open `http://localhost:8080`.
+Run `bun run src/server.ts` and open `http://localhost:8080` (share a room
+with `?room=SomeRoom.15FF`).

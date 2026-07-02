@@ -1,7 +1,8 @@
 // The server side of VibiNet: a WebSocket + static HTTP server (entry
 // point: `bun run src/server.ts`). Everything impure that runs on the
 // server lives here:
-// - Store: append-only disk storage of posts, one .dat/.idx pair per room.
+// - Store: append-only disk storage of posts, one .dat/.idx pair per room
+//          (files are named by the room's 64-bit code as 16 hex digits).
 // - Net:   watcher bookkeeping, contiguous per-client streams, checkpoints.
 // - Http:  static file serving for the walkers demo.
 //
@@ -29,7 +30,7 @@ import {
   statSync as stat_sync,
   writeFileSync as write_file_sync,
 } from "fs";
-import { message_decode, message_encode } from "./vibinet.ts";
+import { message_decode, message_encode, nick_hex } from "./vibinet.ts";
 
 declare const Bun: any;
 
@@ -78,17 +79,6 @@ let time_last = 0;
 function time_now(): number {
   time_last = Math.max(time_last, Math.floor(Date.now()));
   return time_last;
-}
-
-// Room
-// ----
-
-// Room names become filenames; restrict them to a safe charset so they can
-// never traverse paths (e.g. "../../etc/passwd").
-const ROOM_NAME_RE = /^[A-Za-z0-9_-]{1,64}$/;
-
-function room_valid(room: string): boolean {
-  return ROOM_NAME_RE.test(room);
 }
 
 // Record
@@ -211,11 +201,14 @@ function store_get(room: string): Store {
   if (store) {
     return store;
   }
-  if (!room_valid(room)) {
-    throw new Error(`Invalid room name: ${JSON.stringify(room)}`);
+  // Rooms are 64-bit ids; file names use the 16-hex-digit code, which is
+  // filesystem-safe by construction (and case-collision-free on macOS).
+  const hex = nick_hex(room);
+  if (hex === null) {
+    throw new Error(`Invalid room nick: ${JSON.stringify(room)}`);
   }
-  const dat_path = `${DB_DIR}/${room}.dat`;
-  const idx_path = `${DB_DIR}/${room}.idx`;
+  const dat_path = `${DB_DIR}/${hex}.dat`;
+  const idx_path = `${DB_DIR}/${hex}.idx`;
   let offsets: number[] = [];
   let dat_size = 0;
   if (exists_sync(idx_path)) {
@@ -423,9 +416,6 @@ function socket_message(ws: WebSocket, buffer: unknown): void {
   try {
     message = message_decode(bytes_of(buffer));
   } catch {
-    return;
-  }
-  if ("room" in message && !room_valid(message.room)) {
     return;
   }
   switch (message.$) {

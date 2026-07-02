@@ -1,6 +1,6 @@
 {
   "name": "vibinet",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Deterministic input-synced netcode engine for real-time games.",
   "type": "module",
   "main": "./dist/client.js",
@@ -37,6 +37,8 @@
   ],
   "license": "MIT",
   "dependencies": {
+    "@noble/curves": "^2.2.0",
+    "@noble/hashes": "^2.2.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {

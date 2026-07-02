@@ -159,7 +159,7 @@ test("client re-watches from its cursor after reconnect", async () => {
     expect(socket1).toBeDefined();
     socket1.open();
 
-    client.watch("room-d", packer, () => {});
+    client.watch("RoomD#0001", packer, () => {});
     const first_sent = decode_sent(socket1.sent);
     const first_watch = first_sent.find((msg) => msg.$ === "watch");
     expect(first_watch && first_watch.$ === "watch" && first_watch.from).toBe(0);
@@ -168,7 +168,7 @@ test("client re-watches from its cursor after reconnect", async () => {
     for (let i = 0; i < 3; i++) {
       socket1.message({
         $: "info_post",
-        room: "room-d",
+        room: "RoomD#0001",
         index: i,
         server_time: 1000 + i,
         client_time: 1000 + i,
@@ -200,9 +200,9 @@ test("client reconnects and re-watches tracked rooms", async () => {
     expect(socket1).toBeDefined();
     socket1.open();
 
-    client.watch("room-a", packer);
+    client.watch("RoomA#0001", packer);
     const first_sent = decode_sent(socket1.sent);
-    expect(first_sent.some((msg) => msg.$ === "watch" && msg.room === "room-a")).toBeTrue();
+    expect(first_sent.some((msg) => msg.$ === "watch" && msg.room === "RoomA#0001")).toBeTrue();
 
     socket1.fail(1006);
     await wait_until(() => FakeWebSocket.instances.length >= 2);
@@ -212,7 +212,7 @@ test("client reconnects and re-watches tracked rooms", async () => {
     socket2.open();
 
     const second_sent = decode_sent(socket2.sent);
-    expect(second_sent.some((msg) => msg.$ === "watch" && msg.room === "room-a")).toBeTrue();
+    expect(second_sent.some((msg) => msg.$ === "watch" && msg.room === "RoomA#0001")).toBeTrue();
 
     client.close();
   });
@@ -228,13 +228,13 @@ test("client queues posts during disconnect and flushes after reconnect", async 
     socket1.open();
 
     socket1.message({ $: "info_time", nonce: last_time_nonce(socket1), time: Date.now() });
-    client.post("room-b", 7, packer);
+    client.post("RoomB#0001", 7, packer);
 
     const first_sent = decode_sent(socket1.sent);
-    expect(first_sent.some((msg) => msg.$ === "post" && msg.room === "room-b")).toBeTrue();
+    expect(first_sent.some((msg) => msg.$ === "post" && msg.room === "RoomB#0001")).toBeTrue();
 
     socket1.fail(1006);
-    expect(() => client.post("room-b", 9, packer)).not.toThrow();
+    expect(() => client.post("RoomB#0001", 9, packer)).not.toThrow();
 
     await wait_until(() => FakeWebSocket.instances.length >= 2);
     const socket2 = FakeWebSocket.instances[1];
@@ -242,7 +242,7 @@ test("client queues posts during disconnect and flushes after reconnect", async 
     socket2.open();
 
     const second_sent = decode_sent(socket2.sent);
-    const second_posts = second_sent.filter((msg) => msg.$ === "post" && msg.room === "room-b");
+    const second_posts = second_sent.filter((msg) => msg.$ === "post" && msg.room === "RoomB#0001");
     expect(second_posts.length).toBe(1);
 
     client.close();
@@ -260,9 +260,9 @@ test("client flushes all queued posts after reconnect", async () => {
     socket1.message({ $: "info_time", nonce: last_time_nonce(socket1), time: Date.now() });
     socket1.fail(1006);
 
-    expect(() => client.post("room-c", 1, packer)).not.toThrow();
-    expect(() => client.post("room-c", 2, packer)).not.toThrow();
-    expect(() => client.post("room-c", 3, packer)).not.toThrow();
+    expect(() => client.post("RoomC#0001", 1, packer)).not.toThrow();
+    expect(() => client.post("RoomC#0001", 2, packer)).not.toThrow();
+    expect(() => client.post("RoomC#0001", 3, packer)).not.toThrow();
 
     await wait_until(() => FakeWebSocket.instances.length >= 2);
     const socket2 = FakeWebSocket.instances[1];
@@ -270,7 +270,7 @@ test("client flushes all queued posts after reconnect", async () => {
     socket2.open();
 
     const sent = decode_sent(socket2.sent);
-    const posts = sent.filter((msg) => msg.$ === "post" && msg.room === "room-c");
+    const posts = sent.filter((msg) => msg.$ === "post" && msg.room === "RoomC#0001");
     expect(posts.length).toBe(3);
 
     client.close();

@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { SimNetwork, create_rng } from "./sim_network.ts";
 import { Post } from "./walkers_game.ts";
 
-const ROOM = "ordered-stream-room";
+const ROOM = "Ordered#0001";
 
 function spawn(pid_char: string, x: number, y: number): Post {
   return {

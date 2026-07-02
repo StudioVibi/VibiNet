@@ -81,19 +81,19 @@ function on_tick(state: State): State {
 function on_post(post: Post, state: State): State {
   switch (post.$) {
     case "spawn": {
-      const nick = char_from_ascii_code(post.pid);
+      const letter = char_from_ascii_code(post.pid);
       const player = { x: post.x, y: post.y, w: 0, a: 0, s: 0, d: 0 };
-      return { ...state, [nick]: player };
+      return { ...state, [letter]: player };
     }
     case "down": {
-      const nick = char_from_ascii_code(post.pid);
-      const player = { ...state[nick], [post.key.$]: 1 };
-      return { ...state, [nick]: player };
+      const letter = char_from_ascii_code(post.pid);
+      const player = { ...state[letter], [post.key.$]: 1 };
+      return { ...state, [letter]: player };
     }
     case "up": {
-      const nick = char_from_ascii_code(post.pid);
-      const player = { ...state[nick], [post.key.$]: 0 };
-      return { ...state, [nick]: player };
+      const letter = char_from_ascii_code(post.pid);
+      const player = { ...state[letter], [post.key.$]: 0 };
+      return { ...state, [letter]: player };
     }
   }
   return state;
@@ -160,17 +160,20 @@ function resize_canvas() {
 resize_canvas();
 window.addEventListener("resize", resize_canvas);
 
-let room = prompt("Enter room name:");
-if (!room) room = VibiNet.name_gen();
+// Rooms are addressed by nick ("JohnBear#15FF"); in URLs '#' becomes '.'
+// (?room=JohnBear.15FF). Blank = fresh random room.
+const params = new URLSearchParams(window.location.search);
+let room = params.get("room") ?? prompt("Enter room nick (blank = new room):");
+if (!room) room = VibiNet.nick_gen();
 
-const nick = prompt("Enter your nickname (single ASCII character):");
-if (!nick) {
-  alert("Nickname must be a single ASCII character!");
-  throw new Error("Nickname must be one character");
+const letter = prompt("Enter your letter (single ASCII character):");
+if (!letter) {
+  alert("Your letter must be a single ASCII character!");
+  throw new Error("Letter must be one character");
 }
 
-const player_id = ascii_code_from_char(nick);
-const player_char = nick;
+const player_id = ascii_code_from_char(letter);
+const player_char = letter;
 
 // Use local prediction for your player, remote for everyone else.
 const smooth = (remote_state: State, local_state: State): State => {
@@ -271,7 +274,7 @@ function render() {
     const st = game.server_time();
     const pc = game.post_count();
     const rtt = game.ping();
-    ctx.fillText(`room: ${room}`, 8, 6);
+    ctx.fillText(`room: ${game.room}`, 8, 6);
     ctx.fillText(`time: ${st}`, 8, 24);
     ctx.fillText(`tick: ${curr_tick}`, 8, 42);
     ctx.fillText(`post: ${pc}`, 8, 60);
@@ -291,11 +294,11 @@ function render() {
 
 function ascii_code_from_char(char: string): number {
   if (char.length !== 1) {
-    throw new Error("Nickname must be a single character");
+    throw new Error("Letter must be a single character");
   }
   const code = char.charCodeAt(0);
   if (code < 0x20 || code > 0x7e) {
-    throw new Error("Nickname must be a printable ASCII character");
+    throw new Error("Letter must be a printable ASCII character");
   }
   return code;
 }

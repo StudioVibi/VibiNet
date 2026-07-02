@@ -62,6 +62,8 @@
 //
 // Values are encoded by a schema-driven bit packer (Packed): no field names
 // on the wire, no padding, LSB-first bit order, little-endian bytes.
+// Rooms are 64-bit ids, written as nicks ("JohnBear#15FF", see the Nick
+// section); the wire carries the raw 64 bits.
 // Protocol frames are a Packed Union (Message):
 // - get_time: { nonce }                        client -> server
 // - info_time: { nonce, time }                 server -> client
@@ -87,6 +89,8 @@
 // - Nat:    unary; N bits 1 then bit 0 (N+1 bits total).
 // - UInt:   unsigned, exactly `size` bits; number if size <= 53 else bigint.
 // - Int:    two's complement, exactly `size` bits.
+// - Hex:    exactly `size` bytes; the value is 2*size hex chars (lowercase
+//           on decode; either case accepted on encode).
 export type Packed =
   | { $: "Struct"; fields: Record<string, Packed> }
   | { $: "UInt"; size: number }
@@ -97,7 +101,8 @@ export type Packed =
   | { $: "Vector"; size: number; type: Packed }
   | { $: "Map"; key: Packed; value: Packed }
   | { $: "Union"; variants: Record<string, Packed> }
-  | { $: "String" };
+  | { $: "String" }
+  | { $: "Hex"; size: number };
 
 // Bit-level cursors over a byte buffer (builder objects: locally mutated,
 // never shared).
@@ -127,21 +132,25 @@ export type Message =
 type WireMessage =
   | { $: "get_time"; nonce: number }
   | { $: "info_time"; nonce: number; time: number }
-  | { $: "post"; room: string; time: number; name: string; check: WireCheck; payload: number[] }
-  | { $: "info_post"; room: string; index: number; server_time: number; client_time: number;
+  | { $: "post"; room: bigint; time: number; name: string; check: WireCheck; payload: number[] }
+  | { $: "info_post"; room: bigint; index: number; server_time: number; client_time: number;
       name: string; check: WireCheck; payload: number[] }
-  | { $: "watch"; room: string; from: number }
-  | { $: "unwatch"; room: string }
-  | { $: "checkpoint"; room: string; latest_index: number; server_time: number };
+  | { $: "watch"; room: bigint; from: number }
+  | { $: "unwatch"; room: bigint }
+  | { $: "checkpoint"; room: bigint; latest_index: number; server_time: number };
 
 // An authoritative post: the server-assigned envelope around user data P.
+// `data` is undefined when the payload failed to decode under the room's
+// schema: such posts still order and finalize (identically on every
+// client), but never reach on_post. Without this, one junk payload would
+// leave a permanent index gap and stall finalization forever.
 export type Post<P> = {
   index: number;
   server_time: number;
   client_time: number;
   name?: string;
   check: Check | null;
-  data: P;
+  data: P | undefined;
 };
 
 // A local prediction, awaiting its authoritative echo (matched by name).
@@ -644,6 +653,10 @@ function packed_size(type: Packed, val: any): number {
     case "String": {
       return 1 + utf8_size(val) * 9; // Cons bit + 8 bits per byte, plus Nil
     }
+    case "Hex": {
+      packed_assert_size(type.size);
+      return type.size * 8;
+    }
   }
 }
 
@@ -804,6 +817,16 @@ function packed_write(w: Writer, type: Packed, val: any): void {
       writer_utf8(w, val);
       return;
     }
+    case "Hex": {
+      packed_assert_size(type.size);
+      if (typeof val !== "string" || val.length !== type.size * 2 || !HEX_RE.test(val)) {
+        throw new TypeError(`Hex value must be ${type.size * 2} hex chars`);
+      }
+      for (let i = 0; i < type.size; i++) {
+        writer_uint(w, parseInt(val.slice(i * 2, i * 2 + 2), 16), 8);
+      }
+      return;
+    }
   }
 }
 
@@ -907,6 +930,14 @@ function packed_read(r: Reader, type: Packed): any {
     case "String": {
       return reader_utf8(r);
     }
+    case "Hex": {
+      packed_assert_size(type.size);
+      let out = "";
+      for (let i = 0; i < type.size; i++) {
+        out += (reader_uint(r, 8) as number).toString(16).padStart(2, "0");
+      }
+      return out;
+    }
   }
 }
 
@@ -918,6 +949,71 @@ export function packed_encode<A>(type: Packed, val: A): Uint8Array {
 
 export function packed_decode<A>(type: Packed, buf: Uint8Array): A {
   return packed_read(reader_new(buf), type) as A;
+}
+
+// Nick
+// ----
+//
+// A nick is the text form of a 64-bit id: 8 chars in [_a-zA-Z0-9$] (6 bits
+// each, '_' = 0), then '#', then 4 hex digits. Leading '_' are zero digits
+// and are stripped when printing: "Bob#1234" == "_____Bob#1234". Rooms are
+// addressed by nick everywhere; the wire carries the raw 64 bits. In URLs
+// '#' becomes '.' (nick_link); parsing accepts both separators.
+
+const NICK_CHARS = "_abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789$";
+const NICK_RE = /^([_a-zA-Z0-9$]{0,8})[#.]([0-9a-fA-F]{4})$/;
+const HEX_RE = /^[0-9a-fA-F]*$/;
+
+// Parse a nick ('#' or '.' separated) into its 64-bit code.
+export function nick_read(text: string): bigint | null {
+  const match = NICK_RE.exec(text);
+  if (!match) {
+    return null;
+  }
+  const body = match[1].padStart(8, "_");
+  let code = 0n;
+  for (let i = 0; i < 8; i++) {
+    code = (code << 6n) | BigInt(NICK_CHARS.indexOf(body[i]));
+  }
+  return (code << 16n) | BigInt(parseInt(match[2], 16));
+}
+
+// Print a 64-bit code as a canonical nick ("Bob#12AB").
+export function nick_show(code: bigint): string {
+  if (code < 0n || code > 0xffffffffffffffffn) {
+    throw new RangeError("nick code out of u64 range");
+  }
+  let body = "";
+  let rest = code >> 16n;
+  for (let i = 0; i < 8; i++) {
+    body = NICK_CHARS[Number(rest & 63n)] + body;
+    rest >>= 6n;
+  }
+  const tail = (code & 0xffffn).toString(16).toUpperCase().padStart(4, "0");
+  return body.replace(/^_+/, "") + "#" + tail;
+}
+
+// Canonicalize a nick's text form (null if invalid).
+export function nick_norm(text: string): string | null {
+  const code = nick_read(text);
+  if (code === null) {
+    return null;
+  }
+  return nick_show(code);
+}
+
+// URL-safe form: '#' -> '.' ("JohnBear.15FF").
+export function nick_link(text: string): string {
+  return text.replace("#", ".");
+}
+
+// The code as 16 hex digits (db file names; null if invalid).
+export function nick_hex(text: string): string | null {
+  const code = nick_read(text);
+  if (code === null) {
+    return null;
+  }
+  return code.toString(16).padStart(16, "0");
 }
 
 // Check
@@ -941,6 +1037,7 @@ export function check_from_wire(wire: WireCheck): Check | null {
 // -------
 
 const TIME_BITS = 53; // times fit JS safe integers
+const ROOM_BITS = 64; // rooms are 64-bit ids, addressed as nicks
 const BYTES_PACKED: Packed = { $: "List", type: { $: "UInt", size: 8 } };
 
 const CHECK_PACKED: Packed = {
@@ -976,7 +1073,7 @@ const MESSAGE_PACKED: Packed = {
     post: {
       $: "Struct",
       fields: {
-        room: { $: "String" },
+        room: { $: "UInt", size: ROOM_BITS },
         time: { $: "UInt", size: TIME_BITS },
         name: { $: "String" },
         check: CHECK_PACKED,
@@ -986,7 +1083,7 @@ const MESSAGE_PACKED: Packed = {
     info_post: {
       $: "Struct",
       fields: {
-        room: { $: "String" },
+        room: { $: "UInt", size: ROOM_BITS },
         index: { $: "UInt", size: 32 },
         server_time: { $: "UInt", size: TIME_BITS },
         client_time: { $: "UInt", size: TIME_BITS },
@@ -998,20 +1095,20 @@ const MESSAGE_PACKED: Packed = {
     watch: {
       $: "Struct",
       fields: {
-        room: { $: "String" },
+        room: { $: "UInt", size: ROOM_BITS },
         from: { $: "UInt", size: 32 },
       },
     },
     unwatch: {
       $: "Struct",
       fields: {
-        room: { $: "String" },
+        room: { $: "UInt", size: ROOM_BITS },
       },
     },
     checkpoint: {
       $: "Struct",
       fields: {
-        room: { $: "String" },
+        room: { $: "UInt", size: ROOM_BITS },
         latest_index: { $: "Int", size: 32 },
         server_time: { $: "UInt", size: TIME_BITS },
       },
@@ -1035,30 +1132,43 @@ function list_to_bytes(list: number[]): Uint8Array {
   return out;
 }
 
+// Rooms travel as their 64-bit code; text nicks exist only in code and UIs.
+function room_to_wire(room: string): bigint {
+  const code = nick_read(room);
+  if (code === null) {
+    throw new RangeError(`Invalid room nick: ${JSON.stringify(room)}`);
+  }
+  return code;
+}
+
 function message_to_wire(message: Message): WireMessage {
   switch (message.$) {
-    case "post": {
-      return { ...message, payload: bytes_to_list(message.payload) };
+    case "get_time":
+    case "info_time": {
+      return message;
     }
+    case "post":
     case "info_post": {
-      return { ...message, payload: bytes_to_list(message.payload) };
+      return { ...message, room: room_to_wire(message.room), payload: bytes_to_list(message.payload) };
     }
     default: {
-      return message;
+      return { ...message, room: room_to_wire(message.room) };
     }
   }
 }
 
 function message_from_wire(message: WireMessage): Message {
   switch (message.$) {
-    case "post": {
-      return { ...message, payload: list_to_bytes(message.payload) };
+    case "get_time":
+    case "info_time": {
+      return message;
     }
+    case "post":
     case "info_post": {
-      return { ...message, payload: list_to_bytes(message.payload) };
+      return { ...message, room: nick_show(message.room), payload: list_to_bytes(message.payload) };
     }
     default: {
-      return message;
+      return { ...message, room: nick_show(message.room) };
     }
   }
 }
@@ -1120,6 +1230,9 @@ function state_step<S, P>(state: S, bucket: Bucket<P> | undefined, cfg: Config<S
   let next = cfg.on_tick(state);
   if (bucket) {
     for (const post of bucket.remote) {
+      if (post.data === undefined) {
+        continue; // undecodable payload: ordered, but never applied
+      }
       next = cfg.on_post(post.data, next);
     }
     for (const post of bucket.local) {
