@@ -1488,10 +1488,16 @@ function engine_buckets<S, P>(
     bucket.remote.sort((a, b) => a.index - b.index);
   }
   if (include_locals) {
+    // Earliest tick the echo could still land on is base_tick + 1 (base
+    // folds authoritative posts only). Locals below `from` are NOT pulled
+    // up to it: replays may start from a memoized state that already
+    // includes them (re-applying a local once per render made non-
+    // idempotent posts fire repeatedly, e.g. a jump post re-firing mid-air
+    // as a double jump).
+    const anchor = (engine.base_tick ?? (initial_tick - 1)) + 1;
     for (const local of engine.locals.values()) {
-      // Earliest tick the echo could still land on is base_tick + 1 = `from`.
-      const tick = Math.max(time_to_tick(local.client_time, cfg.tick_rate), from);
-      if (tick <= to) {
+      const tick = Math.max(time_to_tick(local.client_time, cfg.tick_rate), anchor);
+      if (tick >= from && tick <= to) {
         bucket_at(tick).local.push(local);
       }
     }

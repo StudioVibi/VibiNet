@@ -293,3 +293,39 @@ test("step never mutates its input engine", () => {
     engine = next;
   }
 });
+
+test("pending locals apply once across hint replays (no phantom re-application)", () => {
+  // A memoized state used as a replay hint ALREADY contains the pending
+  // locals below it. Locals must not be pulled up to the replay start: that
+  // re-applied them once per render until the echo arrived (a local spawn
+  // teleported back; a local jump post re-fired mid-air as a double jump).
+  const t0 = T0;
+  const anchor: NetPost<Post> = {
+    index: 0, server_time: t0, client_time: t0, name: "a0", check: null,
+    data: spawn("A", 100, 100),
+  };
+  let engine = feed([{ $: "post", post: anchor }]);
+  const walk_ms = t0 + 200;
+  engine = engine_step(engine, {
+    $: "local_post",
+    post: { name: "l0", client_time: walk_ms, data: spawn("B", 500, 500) },
+  }, cfg);
+  engine = engine_step(engine, {
+    $: "local_post",
+    post: { name: "l1", client_time: walk_ms, data: key("down", "B", "d") },
+  }, cfg);
+
+  const walk_tick = post_tick({ server_time: walk_ms, client_time: walk_ms }, cfg);
+  const mid_tick = walk_tick + 10;
+  const end_tick = walk_tick + 20;
+
+  const flat = engine_state_at(engine, end_tick, cfg);
+  const mid = engine_state_at(engine, mid_tick, cfg);
+  const hinted = engine_state_at(engine, end_tick, cfg, { tick: mid_tick, state: mid });
+
+  // Same history, so the hinted replay must agree with the flat one. With
+  // the phantom re-application, spawn("B") re-fired at mid_tick + 1 and B
+  // snapped back toward x = 500.
+  expect(hinted).toEqual(flat);
+  expect(hinted["B"].x).toBe(flat["B"].x);
+});
